@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.1"
+VERSION="0.1.2"
 ROOT_DIR="${ROOT_DIR:-$(pwd)}"
 STATE_DIR="${STATE_DIR:-${ROOT_DIR}/.codex-spec-runner}"
 CONTEXT_FILE="${CONTEXT_FILE:-${STATE_DIR}/context.md}"
@@ -894,7 +894,10 @@ run_phase() {
     echo "--- end prompt ---"
     exit_status=0
   else
-    codex_args=("$MODE")
+    codex_args=(
+      --ask-for-approval "$APPROVAL_POLICY"
+      "$MODE"
+    )
     if [[ "$CODEX_EPHEMERAL" == "1" ]]; then
       codex_args+=(--ephemeral)
     fi
@@ -902,7 +905,6 @@ run_phase() {
       --model "$model"
       --cd "$ROOT_DIR"
       --sandbox "$SANDBOX_MODE"
-      --ask-for-approval "$APPROVAL_POLICY"
       -
     )
 

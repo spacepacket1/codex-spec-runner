@@ -15,7 +15,7 @@ version_output="$(
   cd "$REPO_DIR" &&
   codex-spec-runner --version
 )"
-printf '%s\n' "$version_output" | grep -F "codex-spec-runner 0.1.1" >/dev/null
+printf '%s\n' "$version_output" | grep -F "codex-spec-runner 0.1.2" >/dev/null
 
 list_output="$(
   cd "$REPO_DIR" &&
@@ -63,8 +63,8 @@ chmod +x "$fake_codex"
 ) >/dev/null
 
 grep -Fx -- "--ephemeral" "$fake_args" >/dev/null
-first_two_args="$(sed -n '1,2p' "$fake_args")"
-[[ "$first_two_args" == $'exec\n--ephemeral' ]]
+first_four_args="$(sed -n '1,4p' "$fake_args")"
+[[ "$first_four_args" == $'--ask-for-approval\non-request\nexec\n--ephemeral' ]]
 grep -F "Implement Phase 1 (Core Parser)" "$fake_stdin" >/dev/null
 
 echo "phase-10-final-verification: ok"

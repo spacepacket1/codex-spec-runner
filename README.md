@@ -2,7 +2,7 @@
 
 Run Codex CLI phase-by-phase from Markdown feature specs with model routing, shared context, and resumable execution.
 
-Current version: `0.1.1`
+Current version: `0.1.2`
 
 `codex-spec-runner` turns a phased Markdown spec into separate Codex CLI runs. Each phase gets a fresh conversation, a focused prompt, and a model selected from conservative defaults or explicit overrides.
 
@@ -200,7 +200,7 @@ MINI_MODEL=gpt-5.4-mini \
 The runner invokes Codex like this:
 
 ```bash
-codex exec --ephemeral --model "$model" --cd "$ROOT_DIR" --sandbox "$SANDBOX_MODE" --ask-for-approval "$APPROVAL_POLICY" -
+codex --ask-for-approval "$APPROVAL_POLICY" exec --ephemeral --model "$model" --cd "$ROOT_DIR" --sandbox "$SANDBOX_MODE" -
 ```
 
 Environment overrides:
