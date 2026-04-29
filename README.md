@@ -2,6 +2,8 @@
 
 Run Codex CLI phase-by-phase from Markdown feature specs with model routing, shared context, and resumable execution.
 
+Current version: `0.1.0`
+
 `codex-spec-runner` turns a phased Markdown spec into separate Codex CLI runs. Each phase gets a fresh conversation, a focused prompt, and a model selected from conservative defaults or explicit overrides.
 
 ## Why
@@ -55,6 +57,12 @@ List phases and selected models:
 
 ```bash
 codex-spec-runner docs/feature-ticket.md --list
+```
+
+Print the installed runner version:
+
+```bash
+codex-spec-runner --version
 ```
 
 Dry-run one phase prompt:

@@ -11,6 +11,12 @@ PATH="${REPO_DIR}/bin:${PATH}"
 
 bash -n "$RUNNER"
 
+version_output="$(
+  cd "$REPO_DIR" &&
+  codex-spec-runner --version
+)"
+printf '%s\n' "$version_output" | grep -F "codex-spec-runner 0.1.0" >/dev/null
+
 list_output="$(
   cd "$REPO_DIR" &&
   codex-spec-runner "$SPEC_FILE" --list

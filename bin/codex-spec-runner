@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+VERSION="0.1.0"
 ROOT_DIR="${ROOT_DIR:-$(pwd)}"
 STATE_DIR="${STATE_DIR:-${ROOT_DIR}/.codex-spec-runner}"
 CONTEXT_FILE="${CONTEXT_FILE:-${STATE_DIR}/context.md}"
@@ -35,6 +36,7 @@ Options:
   --dry-run            Print prompts instead of running Codex
   --list               List detected phases and selected models
   --read <path>        Add a file to the "Start by reading" list; repeatable
+  --version            Print the runner version
   -h, --help           Show this help
 
 Examples:
@@ -931,6 +933,11 @@ if [[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
   exit 0
 fi
 
+if [[ $# -ge 1 && ( "$1" == "--version" || "$1" == "-V" ) ]]; then
+  printf 'codex-spec-runner %s\n' "$VERSION"
+  exit 0
+fi
+
 if [[ $# -lt 1 ]]; then
   usage
   exit 1
@@ -995,6 +1002,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h|--help)
       usage
+      exit 0
+      ;;
+    --version|-V)
+      printf 'codex-spec-runner %s\n' "$VERSION"
       exit 0
       ;;
     *)
