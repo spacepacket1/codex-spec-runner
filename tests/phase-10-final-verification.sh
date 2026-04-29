@@ -15,7 +15,7 @@ version_output="$(
   cd "$REPO_DIR" &&
   codex-spec-runner --version
 )"
-printf '%s\n' "$version_output" | grep -F "codex-spec-runner 0.1.2" >/dev/null
+printf '%s\n' "$version_output" | grep -F "codex-spec-runner 0.1.3" >/dev/null
 
 list_output="$(
   cd "$REPO_DIR" &&
@@ -34,12 +34,30 @@ phase_dry_run_output="$(
   codex-spec-runner "$SPEC_FILE" 1 --dry-run
 )"
 printf '%s\n' "$phase_dry_run_output" | grep -F "== Phase 1: Core Parser ==" >/dev/null
+printf '%s\n' "$phase_dry_run_output" | grep -F "Status: dry-run only; Codex was not started." >/dev/null
+if printf '%s\n' "$phase_dry_run_output" | grep -F -- "--- prompt ---" >/dev/null; then
+  echo "default dry-run unexpectedly printed full prompt" >&2
+  exit 1
+fi
+
+verbose_phase_dry_run_output="$(
+  cd "$REPO_DIR" &&
+  codex-spec-runner "$SPEC_FILE" 1 --dry-run --verbose
+)"
+printf '%s\n' "$verbose_phase_dry_run_output" | grep -F -- "--- prompt ---" >/dev/null
 
 all_dry_run_output="$(
   cd "$REPO_DIR" &&
   codex-spec-runner "$SPEC_FILE" all --dry-run
 )"
 printf '%s\n' "$all_dry_run_output" | grep -F "== Phase 3: Dashboard Widget ==" >/dev/null
+
+unset_verbose_output="$(
+  cd "$REPO_DIR" &&
+  unset VERBOSE &&
+  codex-spec-runner "$SPEC_FILE" all --from 1 --to 1 --dry-run
+)"
+printf '%s\n' "$unset_verbose_output" | grep -F "Status: dry-run only; Codex was not started." >/dev/null
 
 fake_codex="${TMP_DIR}/codex"
 fake_args="${TMP_DIR}/codex-args"

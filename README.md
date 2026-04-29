@@ -2,7 +2,7 @@
 
 Run Codex CLI phase-by-phase from Markdown feature specs with model routing, shared context, and resumable execution.
 
-Current version: `0.1.2`
+Current version: `0.1.3`
 
 `codex-spec-runner` turns a phased Markdown spec into separate Codex CLI runs. Each phase gets a fresh conversation, a focused prompt, and a model selected from conservative defaults or explicit overrides.
 
@@ -65,10 +65,16 @@ Print the installed runner version:
 codex-spec-runner --version
 ```
 
-Dry-run one phase prompt:
+Dry-run one phase status:
 
 ```bash
 codex-spec-runner docs/feature-ticket.md 3 --dry-run
+```
+
+Print the full generated prompt for debugging:
+
+```bash
+codex-spec-runner docs/feature-ticket.md 3 --dry-run --verbose
 ```
 
 Run preflight checks only:
@@ -238,6 +244,8 @@ COMMON_READ_FILES="package.json pipeline.js server.js"
 - `DEFAULT_MODEL`, `HIGH_MODEL`, `MINI_MODEL`: default routed model names
 - `MODEL_OVERRIDES`: exact `phase:model` mapping that beats heuristic routing and spec annotations
 - `COMMON_READ_FILES`: space-separated files to include in every phase prompt when present
+
+By default, runner output stays high level: current phase, model, status, issues, and verification. Pass `--verbose` when you need full generated prompts or detailed Codex output.
 
 Manifest and summary behavior:
 

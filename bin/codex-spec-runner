@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.2"
+VERSION="0.1.3"
 ROOT_DIR="${ROOT_DIR:-$(pwd)}"
 STATE_DIR="${STATE_DIR:-${ROOT_DIR}/.codex-spec-runner}"
 CONTEXT_FILE="${CONTEXT_FILE:-${STATE_DIR}/context.md}"
@@ -33,7 +33,8 @@ Options:
   --preflight          Run input/environment checks and exit
   --prepare-context    Write shared repo context and exit
   --refresh-context    Regenerate shared repo context before running phases
-  --dry-run            Print prompts instead of running Codex
+  --dry-run            Show selected phase status instead of running Codex
+  --verbose            Print full generated prompts and allow detailed Codex output
   --list               List detected phases and selected models
   --read <path>        Add a file to the "Start by reading" list; repeatable
   --version            Print the runner version
@@ -690,14 +691,23 @@ read_files_block() {
 
 phase_prompt() {
   local phase="$1"
-  local title
+  local verbose="$2"
+  local title output_guidance
   title="$(phase_title "$phase")"
   [[ -n "$title" ]] || die "phase not found in spec: $phase"
+  if [[ "$verbose" == "1" ]]; then
+    output_guidance="Detailed output is allowed because the runner was called with --verbose."
+  else
+    output_guidance="Keep user-facing progress and final output high level: describe phase, status, issues, and verification. Do not paste full code, diffs, or large file contents unless the user asks."
+  fi
 
   cat <<EOF
 We are in ${ROOT_DIR}.
 
 Implement Phase ${phase} (${title}) from ${SPEC_FILE}.
+
+Output policy:
+${output_guidance}
 
 $(read_files_block "$phase")
 $(verification_hints_block "$phase")
@@ -878,6 +888,7 @@ run_preflight() {
 run_phase() {
   local phase="$1"
   local dry_run="$2"
+  local verbose="${3:-0}"
   local model title timestamp exit_status
   local codex_args=()
   title="$(phase_title "$phase")"
@@ -889,11 +900,15 @@ run_phase() {
   echo "Model: ${model}"
 
   if [[ "$dry_run" == "1" ]]; then
-    echo "--- prompt ---"
-    phase_prompt "$phase"
-    echo "--- end prompt ---"
+    echo "Status: dry-run only; Codex was not started."
+    if [[ "$verbose" == "1" ]]; then
+      echo "--- prompt ---"
+      phase_prompt "$phase" "$verbose"
+      echo "--- end prompt ---"
+    fi
     exit_status=0
   else
+    echo "Status: starting Codex phase run."
     codex_args=(
       --ask-for-approval "$APPROVAL_POLICY"
       "$MODE"
@@ -908,7 +923,7 @@ run_phase() {
       -
     )
 
-    if phase_prompt "$phase" | "$CODEX_BIN" "${codex_args[@]}"; then
+    if phase_prompt "$phase" "$verbose" | "$CODEX_BIN" "${codex_args[@]}"; then
       exit_status=0
     else
       exit_status=$?
@@ -917,6 +932,11 @@ run_phase() {
 
   write_manifest_row "$timestamp" "$phase" "$title" "$model" "$dry_run" "$exit_status" || true
   write_phase_summary "$timestamp" "$phase" "$title" "$model" "$exit_status" || true
+  if [[ "$exit_status" == "0" ]]; then
+    echo "Status: phase ${phase} completed."
+  else
+    echo "Status: phase ${phase} failed with exit status ${exit_status}."
+  fi
   return "$exit_status"
 }
 
@@ -927,6 +947,7 @@ LIST_ONLY="0"
 PREFLIGHT_ONLY="0"
 PREPARE_CONTEXT_ONLY="0"
 REFRESH_CONTEXT="0"
+VERBOSE="0"
 FROM_PHASE=""
 TO_PHASE=""
 EXTRA_READ_FILES=()
@@ -958,6 +979,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN="1"
+      shift
+      ;;
+    --verbose)
+      VERBOSE="1"
       shift
       ;;
     --preflight)
@@ -1068,7 +1093,7 @@ if [[ "$TARGET" == "all" ]]; then
 
   for phase in "${PHASE_ORDER[@]}"; do
     if (( phase >= FROM_PHASE && phase <= TO_PHASE )); then
-      run_phase "$phase" "$DRY_RUN"
+      run_phase "$phase" "$DRY_RUN" "${VERBOSE:-0}"
     fi
   done
 else
@@ -1083,5 +1108,5 @@ else
     write_shared_context
   fi
 
-  run_phase "$TARGET" "$DRY_RUN"
+  run_phase "$TARGET" "$DRY_RUN" "${VERBOSE:-0}"
 fi

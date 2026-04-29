@@ -41,8 +41,18 @@ dry_run_output="$(
   COMMON_READ_FILES="" ROOT_DIR="$TMP_DIR" "$RUNNER" "$SPEC_FILE" 1 --dry-run
 )"
 printf '%s\n' "$dry_run_output" | grep -F "Model: gpt-5.4-mini" >/dev/null
-printf '%s\n' "$dry_run_output" | grep -F -- "- docs/annotated-read.md" >/dev/null
-printf '%s\n' "$dry_run_output" | grep -F "Verification hints:" >/dev/null
-printf '%s\n' "$dry_run_output" | grep -F -- "- npm test" >/dev/null
+printf '%s\n' "$dry_run_output" | grep -F "Status: dry-run only; Codex was not started." >/dev/null
+if printf '%s\n' "$dry_run_output" | grep -F -- "- docs/annotated-read.md" >/dev/null; then
+  echo "default dry-run unexpectedly printed annotated read files" >&2
+  exit 1
+fi
+
+verbose_dry_run_output="$(
+  cd "$REPO_DIR" &&
+  COMMON_READ_FILES="" ROOT_DIR="$TMP_DIR" "$RUNNER" "$SPEC_FILE" 1 --dry-run --verbose
+)"
+printf '%s\n' "$verbose_dry_run_output" | grep -F -- "- docs/annotated-read.md" >/dev/null
+printf '%s\n' "$verbose_dry_run_output" | grep -F "Verification hints:" >/dev/null
+printf '%s\n' "$verbose_dry_run_output" | grep -F -- "- npm test" >/dev/null
 
 echo "phase-8-annotations: ok"
