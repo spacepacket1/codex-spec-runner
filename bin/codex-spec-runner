@@ -2,10 +2,19 @@
 set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-$(pwd)}"
+STATE_DIR="${STATE_DIR:-${ROOT_DIR}/.codex-spec-runner}"
+CONTEXT_FILE="${CONTEXT_FILE:-${STATE_DIR}/context.md}"
+MANIFEST_FILE="${MANIFEST_FILE:-${STATE_DIR}/manifest.tsv}"
+SUMMARY_DIR="${SUMMARY_DIR:-${STATE_DIR}/summaries}"
 CODEX_BIN="${CODEX_BIN:-codex}"
+SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"
+USE_SHARED_CONTEXT="${USE_SHARED_CONTEXT:-1}"
+USE_PHASE_SUMMARIES="${USE_PHASE_SUMMARIES:-1}"
+SUMMARY_LOOKBACK="${SUMMARY_LOOKBACK:-1}"
 SANDBOX_MODE="${SANDBOX_MODE:-workspace-write}"
 APPROVAL_POLICY="${APPROVAL_POLICY:-on-request}"
 MODE="${MODE:-exec}"
+CODEX_EPHEMERAL="${CODEX_EPHEMERAL:-1}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-gpt-5.4}"
 HIGH_MODEL="${HIGH_MODEL:-gpt-5.5}"
 MINI_MODEL="${MINI_MODEL:-gpt-5.4-mini}"
@@ -20,6 +29,9 @@ Usage:
 Options:
   --from <n>           Start phase for "all"
   --to <n>             End phase for "all"
+  --preflight          Run input/environment checks and exit
+  --prepare-context    Write shared repo context and exit
+  --refresh-context    Regenerate shared repo context before running phases
   --dry-run            Print prompts instead of running Codex
   --list               List detected phases and selected models
   --read <path>        Add a file to the "Start by reading" list; repeatable
@@ -33,10 +45,19 @@ Examples:
 
 Environment overrides:
   ROOT_DIR=/path/to/repo
+  STATE_DIR=/path/to/repo/.codex-spec-runner
+  CONTEXT_FILE=/path/to/repo/.codex-spec-runner/context.md
+  MANIFEST_FILE=/path/to/repo/.codex-spec-runner/manifest.tsv
+  SUMMARY_DIR=/path/to/repo/.codex-spec-runner/summaries
   CODEX_BIN=codex
+  SKIP_PREFLIGHT=0
+  USE_SHARED_CONTEXT=1
+  USE_PHASE_SUMMARIES=1
+  SUMMARY_LOOKBACK=1
   SANDBOX_MODE=workspace-write
   APPROVAL_POLICY=on-request
   MODE=exec
+  CODEX_EPHEMERAL=1
   DEFAULT_MODEL=gpt-5.4
   HIGH_MODEL=gpt-5.5
   MINI_MODEL=gpt-5.4-mini
@@ -60,12 +81,36 @@ die() {
   exit 1
 }
 
+warn() {
+  echo "warning: $*" >&2
+}
+
+ensure_state_dir() {
+  [[ -d "$STATE_DIR" ]] && return 0
+  mkdir -p "$STATE_DIR" || die "failed to create state directory: $STATE_DIR"
+}
+
 require_spec() {
   [[ -f "$SPEC_FILE" ]] || die "spec file not found: $SPEC_FILE"
 }
 
-phase_lines() {
-  awk '
+root_dir_exists() {
+  [[ -d "$ROOT_DIR" ]]
+}
+
+PHASE_METADATA=()
+PHASE_ORDER=()
+PHASE_LINES=()
+PHASE_TITLES=()
+
+load_phase_metadata() {
+  local line phase_number phase_line phase_title
+  local metadata_file
+
+  PHASE_METADATA=()
+  metadata_file="$(mktemp "${TMPDIR:-/tmp}/codex-spec-runner.phases.XXXXXX")" || die "failed to create temp file"
+
+  if ! awk '
     /^#{1,6}[[:space:]]+.*[Pp]hase[[:space:]]+[0-9]+/ {
       line = $0
       if (match(line, /[Pp]hase[[:space:]]+([0-9]+)/)) {
@@ -79,12 +124,46 @@ phase_lines() {
         print phase "\t" NR "\t" title
       }
     }
-  ' "$SPEC_FILE" | sort -n -k1,1
+  ' "$SPEC_FILE" | sort -n -k1,1 -k2,2 | awk -F '\t' '
+    {
+      if ($1 == previous_phase) {
+        printf "error: duplicate phase number in spec: %s\n", $1 > "/dev/stderr"
+        exit 1
+      }
+      previous_phase = $1
+      print
+    }
+  ' > "$metadata_file"; then
+    rm -f "$metadata_file"
+    exit 1
+  fi
+
+  while IFS= read -r line; do
+    PHASE_METADATA+=("$line")
+  done < "$metadata_file"
+  rm -f "$metadata_file"
+
+  PHASE_ORDER=()
+  PHASE_LINES=()
+  PHASE_TITLES=()
+
+  for line in "${PHASE_METADATA[@]}"; do
+    IFS=$'\t' read -r phase_number phase_line phase_title <<< "$line"
+    PHASE_ORDER+=("$phase_number")
+    PHASE_LINES+=("$phase_line")
+    PHASE_TITLES+=("$phase_title")
+  done
 }
 
 phase_title() {
   local phase="$1"
-  phase_lines | awk -F '\t' -v p="$phase" '$1 == p { print $3; exit }'
+  local index
+  for index in "${!PHASE_ORDER[@]}"; do
+    if [[ "${PHASE_ORDER[$index]}" == "$phase" ]]; then
+      printf '%s\n' "${PHASE_TITLES[$index]}"
+      return 0
+    fi
+  done
 }
 
 phase_exists() {
@@ -92,33 +171,448 @@ phase_exists() {
   [[ -n "$(phase_title "$phase")" ]]
 }
 
+resolve_read_path() {
+  local path="$1"
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s\n' "${ROOT_DIR}/${path}"
+  fi
+}
+
+shared_context_enabled() {
+  [[ "$USE_SHARED_CONTEXT" == "1" ]]
+}
+
+include_context_file() {
+  shared_context_enabled && [[ -f "$CONTEXT_FILE" ]]
+}
+
+phase_summaries_enabled() {
+  [[ "$USE_PHASE_SUMMARIES" == "1" ]]
+}
+
+summary_lookback() {
+  if [[ "$SUMMARY_LOOKBACK" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$SUMMARY_LOOKBACK"
+  else
+    printf '%s\n' "1"
+  fi
+}
+
+manifest_field() {
+  printf '%s' "$1" | tr '\t\r\n' '   '
+}
+
+write_manifest_row() {
+  local timestamp="$1"
+  local phase="$2"
+  local title="$3"
+  local model="$4"
+  local dry_run="$5"
+  local exit_status="$6"
+
+  if [[ ! -d "$STATE_DIR" ]] && ! mkdir -p "$STATE_DIR"; then
+    warn "failed to prepare state directory for manifest: $STATE_DIR"
+    return 1
+  fi
+
+  if ! printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(manifest_field "$timestamp")" \
+    "$(manifest_field "$SPEC_FILE")" \
+    "$(manifest_field "$phase")" \
+    "$(manifest_field "$title")" \
+    "$(manifest_field "$model")" \
+    "$(manifest_field "$MODE")" \
+    "$(manifest_field "$dry_run")" \
+    "$(manifest_field "$exit_status")" >> "$MANIFEST_FILE"; then
+    warn "failed to append manifest row: $MANIFEST_FILE"
+    return 1
+  fi
+}
+
+summary_file() {
+  local phase="$1"
+  printf '%s/phase-%s.md\n' "$SUMMARY_DIR" "$phase"
+}
+
+summary_indicates_success() {
+  local summary_file_path="$1"
+  [[ -f "$summary_file_path" ]] || return 1
+  grep -Eq '^-[[:space:]]+Exit status:[[:space:]]+0$' "$summary_file_path"
+}
+
+previous_summary_files() {
+  local phase="$1"
+  local index current_index="" lookback_count found=0 prior_phase prior_summary
+  local files=()
+
+  [[ "$TARGET" == "all" ]] || return 0
+  phase_summaries_enabled || return 0
+
+  lookback_count="$(summary_lookback)"
+  (( lookback_count > 0 )) || return 0
+
+  for index in "${!PHASE_ORDER[@]}"; do
+    if [[ "${PHASE_ORDER[$index]}" == "$phase" ]]; then
+      current_index="$index"
+      break
+    fi
+  done
+
+  [[ -n "$current_index" ]] || return 0
+
+  for (( index = current_index - 1; index >= 0 && found < lookback_count; index-- )); do
+    prior_phase="${PHASE_ORDER[$index]}"
+    prior_summary="$(summary_file "$prior_phase")"
+    if summary_indicates_success "$prior_summary"; then
+      files+=("$prior_summary")
+      found=$((found + 1))
+    fi
+  done
+
+  if (( ${#files[@]} == 0 )); then
+    return 0
+  fi
+
+  for (( index = ${#files[@]} - 1; index >= 0; index-- )); do
+    printf '%s\n' "${files[$index]}"
+  done
+}
+
+write_phase_summary() {
+  local timestamp="$1"
+  local phase="$2"
+  local title="$3"
+  local model="$4"
+  local exit_status="$5"
+  local summary_file_path human_notes
+
+  summary_file_path="$(summary_file "$phase")"
+
+  if [[ ! -d "$SUMMARY_DIR" ]] && ! mkdir -p "$SUMMARY_DIR"; then
+    warn "failed to prepare summary directory: $SUMMARY_DIR"
+    return 1
+  fi
+
+  human_notes="$(awk '
+    found { print }
+    /^## Human Notes$/ { found = 1; print }
+  ' "$summary_file_path" 2>/dev/null || true)"
+
+  if ! {
+    echo "# Phase ${phase} Summary"
+    echo
+    echo "- Phase: ${phase}"
+    echo "- Title: ${title}"
+    echo "- Model: ${model}"
+    echo "- Completed: ${timestamp}"
+    echo "- Exit status: ${exit_status}"
+    echo
+    if [[ -n "$human_notes" ]]; then
+      printf '%s\n' "$human_notes"
+    else
+      echo "## Human Notes"
+      echo
+      echo "- Add notes here."
+    fi
+  } > "$summary_file_path"; then
+    warn "failed to write phase summary: $summary_file_path"
+    return 1
+  fi
+}
+
+git_branch() {
+  git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true
+}
+
+git_status_summary() {
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local output
+    output="$(git -C "$ROOT_DIR" status --short 2>/dev/null || true)"
+    if [[ -z "$output" ]]; then
+      printf '%s\n' "- clean"
+      return 0
+    fi
+
+    printf '%s\n' "$output" | awk '
+      NR <= 20 { print "- " $0 }
+      NR == 21 { print "- ..."; exit }
+    '
+  else
+    printf '%s\n' "- not a git repository"
+  fi
+}
+
+top_level_layout() {
+  local output
+  output="$(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -print 2>/dev/null \
+    | sed "s#^$ROOT_DIR/##" \
+    | sort || true)"
+
+  if [[ -z "$output" ]]; then
+    printf '%s\n' "- empty"
+    return 0
+  fi
+
+  printf '%s\n' "$output" | awk '
+      NR <= 40 { print "- " $0 }
+      NR == 41 { print "- ..."; exit }
+    '
+}
+
+detected_package_files() {
+  local output
+  output="$(find "$ROOT_DIR" -maxdepth 2 \( \
+    -name 'package.json' -o \
+    -name 'package-lock.json' -o \
+    -name 'pnpm-lock.yaml' -o \
+    -name 'yarn.lock' -o \
+    -name 'bun.lockb' -o \
+    -name 'tsconfig.json' -o \
+    -name 'vitest.config.*' -o \
+    -name 'jest.config.*' -o \
+    -name 'eslint.config.*' -o \
+    -name '.eslintrc*' -o \
+    -name 'prettier.config.*' -o \
+    -name '.prettierrc*' -o \
+    -name 'pyproject.toml' -o \
+    -name 'requirements*.txt' -o \
+    -name 'pytest.ini' -o \
+    -name 'tox.ini' -o \
+    -name 'go.mod' -o \
+    -name 'Cargo.toml' -o \
+    -name 'Makefile' -o \
+    -name 'Dockerfile' -o \
+    -name 'docker-compose*.yml' -o \
+    -name 'docker-compose*.yaml' -o \
+    -name 'compose.yml' -o \
+    -name 'compose.yaml' -o \
+    -name '.tool-versions' -o \
+    -name '.nvmrc' -o \
+    -name 'Gemfile' \
+  \) -print 2>/dev/null \
+    | sed "s#^$ROOT_DIR/##" \
+    | sort || true)"
+
+  if [[ -z "$output" ]]; then
+    printf '%s\n' "- none detected"
+    return 0
+  fi
+
+  printf '%s\n' "$output" | awk '
+      NR <= 40 { print "- " $0 }
+      NR == 41 { print "- ..."; exit }
+    '
+}
+
+likely_verification_commands() {
+  local commands=()
+  local command
+
+  if [[ -f "$ROOT_DIR/package.json" ]]; then
+    commands+=("npm test")
+  fi
+  if [[ -f "$ROOT_DIR/pnpm-lock.yaml" ]]; then
+    commands+=("pnpm test")
+  fi
+  if [[ -f "$ROOT_DIR/yarn.lock" ]]; then
+    commands+=("yarn test")
+  fi
+  if [[ -f "$ROOT_DIR/pyproject.toml" || -f "$ROOT_DIR/pytest.ini" || -f "$ROOT_DIR/tox.ini" ]]; then
+    commands+=("pytest")
+  fi
+  if [[ -f "$ROOT_DIR/go.mod" ]]; then
+    commands+=("go test ./...")
+  fi
+  if [[ -f "$ROOT_DIR/Cargo.toml" ]]; then
+    commands+=("cargo test")
+  fi
+  if [[ -f "$ROOT_DIR/Makefile" ]]; then
+    commands+=("make test")
+  fi
+  if [[ -f "$ROOT_DIR/bin/codex-spec-runner" ]]; then
+    commands+=("bash -n bin/codex-spec-runner")
+  fi
+
+  if [[ ${#commands[@]} -eq 0 ]]; then
+    printf '%s\n' "- none inferred"
+    return 0
+  fi
+
+  for command in "${commands[@]}"; do
+    printf '%s\n' "- $command"
+  done
+}
+
+common_read_files_summary() {
+  local files=()
+  local file resolved_path
+
+  # shellcheck disable=SC2206
+  files=($COMMON_READ_FILES)
+  if [[ ${#files[@]} -eq 0 ]]; then
+    printf '%s\n' "- none configured"
+    return 0
+  fi
+
+  for file in "${files[@]}"; do
+    [[ -n "$file" ]] || continue
+    resolved_path="$(resolve_read_path "$file")"
+    if [[ -e "$resolved_path" ]]; then
+      printf '%s\n' "- $file (present)"
+    else
+      printf '%s\n' "- $file (missing)"
+    fi
+  done
+}
+
+write_shared_context() {
+  local timestamp branch
+
+  ensure_state_dir
+  timestamp="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  branch="$(git_branch)"
+
+  {
+    echo "# Shared Repo Context"
+    echo
+    echo "- Timestamp: ${timestamp}"
+    echo "- Root directory: ${ROOT_DIR}"
+    if [[ -n "$branch" ]]; then
+      echo "- Git branch: ${branch}"
+    else
+      echo "- Git branch: unavailable"
+    fi
+    echo
+    echo "## Git Status Summary"
+    git_status_summary
+    echo
+    echo "## Top-Level Layout"
+    top_level_layout
+    echo
+    echo "## Detected Package and Config Files"
+    detected_package_files || true
+    echo
+    echo "## Likely Verification Commands"
+    likely_verification_commands
+    echo
+    echo "## Common Read Files"
+    common_read_files_summary
+  } > "$CONTEXT_FILE" || die "failed to write context file: $CONTEXT_FILE"
+}
+
 first_phase() {
-  phase_lines | awk -F '\t' 'NR == 1 { print $1 }'
+  [[ ${#PHASE_ORDER[@]} -gt 0 ]] && printf '%s\n' "${PHASE_ORDER[0]}"
 }
 
 last_phase() {
-  phase_lines | awk -F '\t' 'END { print $1 }'
+  local last_index
+  last_index=$(( ${#PHASE_ORDER[@]} - 1 ))
+  [[ $last_index -ge 0 ]] && printf '%s\n' "${PHASE_ORDER[$last_index]}"
+}
+
+phase_start_line() {
+  local phase="$1"
+  local index
+  for index in "${!PHASE_ORDER[@]}"; do
+    if [[ "${PHASE_ORDER[$index]}" == "$phase" ]]; then
+      printf '%s\n' "${PHASE_LINES[$index]}"
+      return 0
+    fi
+  done
+}
+
+phase_end_line() {
+  local phase="$1"
+  local index next_index
+  for index in "${!PHASE_ORDER[@]}"; do
+    if [[ "${PHASE_ORDER[$index]}" == "$phase" ]]; then
+      next_index=$(( index + 1 ))
+      if (( next_index < ${#PHASE_ORDER[@]} )); then
+        printf '%s\n' "${PHASE_LINES[$next_index]}"
+      fi
+      return 0
+    fi
+  done
+
+  return 0
 }
 
 extract_phase_body() {
   local phase="$1"
-  awk -v target="$phase" '
-    function phase_number(line,    copy) {
-      copy = line
-      if (copy !~ /^#{1,6}[[:space:]]+.*[Pp]hase[[:space:]]+[0-9]+/) return ""
-      sub(/^.*[Pp]hase[[:space:]]+/, "", copy)
-      sub(/[^0-9].*$/, "", copy)
-      return copy
-    }
-    {
-      p = phase_number($0)
-      if (p != "") {
-        if (found && p != target) exit
-        if (p == target) found = 1
-      }
-      if (found) print
-    }
+  local start_line end_line
+  start_line="$(phase_start_line "$phase")"
+  [[ -n "$start_line" ]] || return 1
+  end_line="$(phase_end_line "$phase")"
+
+  awk -v start_line="$start_line" -v end_line="${end_line:-0}" '
+    NR < start_line { next }
+    end_line > 0 && NR >= end_line { exit }
+    { print }
   ' "$SPEC_FILE"
+}
+
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "$value"
+}
+
+phase_annotations() {
+  local phase="$1"
+  local line key value trimmed_line
+
+  while IFS= read -r line; do
+    trimmed_line="$(trim_whitespace "$line")"
+    if [[ "$trimmed_line" =~ ^\<\!--[[:space:]]*codex:([[:alnum:]_-]+)=(.*)--\>$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="$(trim_whitespace "${BASH_REMATCH[2]}")"
+      [[ -n "$value" ]] || continue
+      printf '%s\t%s\n' "$key" "$value"
+    fi
+  done < <(extract_phase_body "$phase")
+}
+
+annotation_model() {
+  local phase="$1"
+  local key value selected=""
+
+  while IFS=$'\t' read -r key value; do
+    if [[ "$key" == "model" ]]; then
+      selected="$value"
+    fi
+  done < <(phase_annotations "$phase")
+
+  [[ -n "$selected" ]] || return 1
+  printf '%s\n' "$selected"
+}
+
+annotation_read_files() {
+  local phase="$1"
+  local key value
+
+  while IFS=$'\t' read -r key value; do
+    if [[ "$key" == "read" ]]; then
+      printf '%s\n' "$value"
+    fi
+  done < <(phase_annotations "$phase")
+}
+
+verification_hints_block() {
+  local phase="$1"
+  local key value found="0"
+
+  while IFS=$'\t' read -r key value; do
+    if [[ "$key" == "verify" ]]; then
+      if [[ "$found" == "0" ]]; then
+        echo "Verification hints:"
+        found="1"
+      fi
+      echo "- $value"
+    fi
+  done < <(phase_annotations "$phase")
 }
 
 override_model() {
@@ -142,6 +636,7 @@ phase_model() {
   local phase="$1"
   local title body lower title_lower
   if override_model "$phase"; then return 0; fi
+  if annotation_model "$phase"; then return 0; fi
 
   title="$(phase_title "$phase")"
   title_lower="$(printf '%s\n' "$title" | tr '[:upper:]' '[:lower:]')"
@@ -162,10 +657,20 @@ phase_model() {
 }
 
 read_files_block() {
+  local phase="$1"
   local files=()
   local file
   # shellcheck disable=SC2206
   files=($COMMON_READ_FILES)
+  if include_context_file; then
+    files+=("$CONTEXT_FILE")
+  fi
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && files+=("$file")
+  done < <(previous_summary_files "$phase")
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && files+=("$file")
+  done < <(annotation_read_files "$phase")
   if [[ ${#EXTRA_READ_FILES[@]} -gt 0 ]]; then
     files+=("${EXTRA_READ_FILES[@]}")
   fi
@@ -174,12 +679,11 @@ read_files_block() {
     return 0
   fi
 
-  echo "Start by reading:"
+  echo "Read first:"
   echo "- ${SPEC_FILE}"
   for file in "${files[@]}"; do
     [[ -n "$file" ]] && echo "- $file"
   done
-  echo
 }
 
 phase_prompt() {
@@ -191,22 +695,20 @@ phase_prompt() {
   cat <<EOF
 We are in ${ROOT_DIR}.
 
-Please implement Phase ${phase} from ${SPEC_FILE}:
-${title}.
+Implement Phase ${phase} (${title}) from ${SPEC_FILE}.
 
-Keep changes scoped. Preserve existing behavior. Do not touch node_modules. Do not implement later phases.
+$(read_files_block "$phase")
+$(verification_hints_block "$phase")
+Resume:
+If resuming after an interruption, inspect the working tree first and continue this phase.
 
-$(read_files_block)
-Context:
-This is one phase from a larger feature ticket. If this is a resume after a rate limit or interrupted run, first inspect the current working tree and continue the interrupted phase rather than restarting completed work.
-
-General acceptance criteria:
-- Use the existing codebase patterns.
-- Keep edits scoped to this phase.
-- Preserve existing behavior unless the phase explicitly requires a change.
-- Add or update tests/checks where appropriate.
+Guardrails:
+- Keep changes scoped to this phase; do not implement later phases.
+- Preserve existing behavior unless this phase explicitly requires a change.
+- Use existing codebase patterns.
+- Do not touch node_modules.
+- Add or update focused tests/checks where appropriate.
 - Run verification before finishing.
-- Do not implement later phases from the spec.
 
 Relevant phase section from the spec:
 
@@ -215,20 +717,171 @@ EOF
 }
 
 list_phases() {
-  local line phase title model
-  phase_lines | while IFS=$'\t' read -r phase _line title; do
+  local index phase title model
+  for index in "${!PHASE_ORDER[@]}"; do
+    phase="${PHASE_ORDER[$index]}"
+    title="${PHASE_TITLES[$index]}"
     model="$(phase_model "$phase")"
     printf 'Phase %s\t%s\t%s\n' "$phase" "$model" "$title"
   done
 }
 
+validate_phase_range() {
+  [[ "$FROM_PHASE" =~ ^[0-9]+$ ]] || die "invalid --from phase: $FROM_PHASE"
+  [[ "$TO_PHASE" =~ ^[0-9]+$ ]] || die "invalid --to phase: $TO_PHASE"
+  (( FROM_PHASE <= TO_PHASE )) || die "--from must be <= --to"
+}
+
+preflight_note() {
+  local level="$1"
+  shift
+  printf '%s: %s\n' "$level" "$*"
+}
+
+run_preflight() {
+  local warnings=0 errors=0
+  local phase file resolved_path selected=0
+  local common_files=()
+  local common_file
+
+  if [[ -f "$SPEC_FILE" ]]; then
+    preflight_note "ok" "spec file exists: $SPEC_FILE"
+  else
+    preflight_note "error" "spec file not found: $SPEC_FILE"
+    errors=$((errors + 1))
+  fi
+
+  if root_dir_exists; then
+    preflight_note "ok" "root directory exists: $ROOT_DIR"
+  else
+    preflight_note "error" "root directory not found or not a directory: $ROOT_DIR"
+    errors=$((errors + 1))
+  fi
+
+  if [[ "$CODEX_BIN" == */* ]]; then
+    if [[ -x "$CODEX_BIN" ]]; then
+      preflight_note "ok" "Codex binary is executable: $CODEX_BIN"
+    else
+      preflight_note "error" "Codex binary is not executable: $CODEX_BIN"
+      errors=$((errors + 1))
+    fi
+  else
+    if command -v "$CODEX_BIN" >/dev/null 2>&1; then
+      preflight_note "ok" "Codex binary found on PATH: $CODEX_BIN"
+    else
+      preflight_note "error" "Codex binary not found on PATH: $CODEX_BIN"
+      errors=$((errors + 1))
+    fi
+  fi
+
+  if [[ -f "$SPEC_FILE" ]]; then
+    if (( ${#PHASE_ORDER[@]} > 0 )); then
+      :
+    else
+      preflight_note "error" "no phase headings found in $SPEC_FILE"
+      errors=$((errors + 1))
+    fi
+  fi
+
+  if [[ -n "$TARGET" ]]; then
+    if [[ "$TARGET" == "all" ]]; then
+      if [[ -z "$FROM_PHASE" && -f "$SPEC_FILE" && ${#PHASE_ORDER[@]} -gt 0 ]]; then
+        FROM_PHASE="$(first_phase)"
+      fi
+      if [[ -z "$TO_PHASE" && -f "$SPEC_FILE" && ${#PHASE_ORDER[@]} -gt 0 ]]; then
+        TO_PHASE="$(last_phase)"
+      fi
+
+      if [[ "$FROM_PHASE" =~ ^[0-9]+$ ]]; then
+        preflight_note "ok" "--from phase is numeric: $FROM_PHASE"
+      else
+        preflight_note "error" "invalid --from phase: $FROM_PHASE"
+        errors=$((errors + 1))
+      fi
+
+      if [[ "$TO_PHASE" =~ ^[0-9]+$ ]]; then
+        preflight_note "ok" "--to phase is numeric: $TO_PHASE"
+      else
+        preflight_note "error" "invalid --to phase: $TO_PHASE"
+        errors=$((errors + 1))
+      fi
+
+      if [[ "$FROM_PHASE" =~ ^[0-9]+$ && "$TO_PHASE" =~ ^[0-9]+$ ]]; then
+        if (( FROM_PHASE <= TO_PHASE )); then
+          for phase in "${PHASE_ORDER[@]}"; do
+            if (( phase >= FROM_PHASE && phase <= TO_PHASE )); then
+              selected=$((selected + 1))
+            fi
+          done
+
+          if (( selected > 0 )); then
+            preflight_note "ok" "selected ${selected} phase(s) for target all"
+          else
+            preflight_note "error" "selected phase range does not include any phases"
+            errors=$((errors + 1))
+          fi
+        else
+          preflight_note "error" "--from must be <= --to"
+          errors=$((errors + 1))
+        fi
+      fi
+    else
+      if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+        if phase_exists "$TARGET"; then
+          preflight_note "ok" "selected phase exists: $TARGET"
+        else
+          preflight_note "error" "phase not found in spec: $TARGET"
+          errors=$((errors + 1))
+        fi
+      else
+        preflight_note "error" "target must be all or a phase number"
+        errors=$((errors + 1))
+      fi
+    fi
+  fi
+
+  # shellcheck disable=SC2206
+  common_files=($COMMON_READ_FILES)
+  for common_file in "${common_files[@]}"; do
+    [[ -n "$common_file" ]] || continue
+    resolved_path="$(resolve_read_path "$common_file")"
+    if [[ -e "$resolved_path" ]]; then
+      :
+    else
+      preflight_note "warning" "common read file not found: $common_file"
+      warnings=$((warnings + 1))
+    fi
+  done
+
+  if (( ${#EXTRA_READ_FILES[@]} > 0 )); then
+    for file in "${EXTRA_READ_FILES[@]}"; do
+      resolved_path="$(resolve_read_path "$file")"
+      if [[ -e "$resolved_path" ]]; then
+        preflight_note "ok" "read file exists: $file"
+      else
+        preflight_note "error" "read file not found: $file"
+        errors=$((errors + 1))
+      fi
+    done
+  fi
+
+  if (( errors > 0 )); then
+    preflight_note "result" "failed with ${errors} error(s), ${warnings} warning(s)"
+    return 1
+  fi
+
+  preflight_note "result" "ok${warnings:+ with ${warnings} warning(s)}"
+}
+
 run_phase() {
   local phase="$1"
   local dry_run="$2"
-  local model title
+  local model title timestamp exit_status
+  local codex_args=()
   title="$(phase_title "$phase")"
   [[ -n "$title" ]] || die "phase not found in spec: $phase"
   model="$(phase_model "$phase")"
+  timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 
   echo "== Phase ${phase}: ${title} =="
   echo "Model: ${model}"
@@ -237,25 +890,46 @@ run_phase() {
     echo "--- prompt ---"
     phase_prompt "$phase"
     echo "--- end prompt ---"
-    return 0
+    exit_status=0
+  else
+    codex_args=(
+      --model "$model"
+      --cd "$ROOT_DIR"
+      --sandbox "$SANDBOX_MODE"
+      --ask-for-approval "$APPROVAL_POLICY"
+    )
+    if [[ "$CODEX_EPHEMERAL" == "1" ]]; then
+      codex_args+=(--ephemeral)
+    fi
+    codex_args+=("$MODE" -)
+
+    if phase_prompt "$phase" | "$CODEX_BIN" "${codex_args[@]}"; then
+      exit_status=0
+    else
+      exit_status=$?
+    fi
   fi
 
-  phase_prompt "$phase" | "$CODEX_BIN" \
-    --model "$model" \
-    --cd "$ROOT_DIR" \
-    --sandbox "$SANDBOX_MODE" \
-    --ask-for-approval "$APPROVAL_POLICY" \
-    "$MODE" \
-    -
+  write_manifest_row "$timestamp" "$phase" "$title" "$model" "$dry_run" "$exit_status" || true
+  write_phase_summary "$timestamp" "$phase" "$title" "$model" "$exit_status" || true
+  return "$exit_status"
 }
 
 SPEC_FILE=""
 TARGET=""
 DRY_RUN="0"
 LIST_ONLY="0"
+PREFLIGHT_ONLY="0"
+PREPARE_CONTEXT_ONLY="0"
+REFRESH_CONTEXT="0"
 FROM_PHASE=""
 TO_PHASE=""
 EXTRA_READ_FILES=()
+
+if [[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
+  usage
+  exit 0
+fi
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -274,6 +948,18 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN="1"
+      shift
+      ;;
+    --preflight)
+      PREFLIGHT_ONLY="1"
+      shift
+      ;;
+    --prepare-context)
+      PREPARE_CONTEXT_ONLY="1"
+      shift
+      ;;
+    --refresh-context)
+      REFRESH_CONTEXT="1"
       shift
       ;;
     --list)
@@ -318,13 +1004,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_spec
+load_phase_metadata
 
-if [[ -z "$(phase_lines)" ]]; then
+if (( ${#PHASE_ORDER[@]} == 0 )); then
   die "no phase headings found in $SPEC_FILE"
 fi
 
 if [[ "$LIST_ONLY" == "1" ]]; then
   list_phases
+  exit 0
+fi
+
+if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
+  run_preflight
+  exit $?
+fi
+
+if [[ "$PREPARE_CONTEXT_ONLY" == "1" ]]; then
+  write_shared_context
+  echo "Wrote shared context: $CONTEXT_FILE"
   exit 0
 fi
 
@@ -335,11 +1033,26 @@ fi
 if [[ "$TARGET" == "all" ]]; then
   FROM_PHASE="${FROM_PHASE:-$(first_phase)}"
   TO_PHASE="${TO_PHASE:-$(last_phase)}"
-  [[ "$FROM_PHASE" =~ ^[0-9]+$ ]] || die "invalid --from phase: $FROM_PHASE"
-  [[ "$TO_PHASE" =~ ^[0-9]+$ ]] || die "invalid --to phase: $TO_PHASE"
-  (( FROM_PHASE <= TO_PHASE )) || die "--from must be <= --to"
+  validate_phase_range
 
-  phase_lines | while IFS=$'\t' read -r phase _line _title; do
+  selected_any="0"
+  for phase in "${PHASE_ORDER[@]}"; do
+    if (( phase >= FROM_PHASE && phase <= TO_PHASE )); then
+      selected_any="1"
+      break
+    fi
+  done
+  [[ "$selected_any" == "1" ]] || die "selected phase range does not include any phases"
+
+  if [[ "$DRY_RUN" != "1" && "$SKIP_PREFLIGHT" != "1" ]]; then
+    run_preflight
+  fi
+
+  if shared_context_enabled && [[ "$REFRESH_CONTEXT" == "1" || ! -f "$CONTEXT_FILE" ]]; then
+    write_shared_context
+  fi
+
+  for phase in "${PHASE_ORDER[@]}"; do
     if (( phase >= FROM_PHASE && phase <= TO_PHASE )); then
       run_phase "$phase" "$DRY_RUN"
     fi
@@ -347,5 +1060,14 @@ if [[ "$TARGET" == "all" ]]; then
 else
   [[ "$TARGET" =~ ^[0-9]+$ ]] || die "target must be all or a phase number"
   phase_exists "$TARGET" || die "phase not found in spec: $TARGET"
+
+  if [[ "$DRY_RUN" != "1" && "$SKIP_PREFLIGHT" != "1" ]]; then
+    run_preflight
+  fi
+
+  if [[ "$REFRESH_CONTEXT" == "1" ]]; then
+    write_shared_context
+  fi
+
   run_phase "$TARGET" "$DRY_RUN"
 fi
