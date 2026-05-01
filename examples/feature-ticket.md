@@ -4,8 +4,8 @@
 
 Build the first minimal parser.
 
-<!-- codex:model=gpt-5.4-mini -->
-<!-- codex:verify=bash tests/core-parser.sh -->
+<!-- runner:model=mini -->
+<!-- runner:verify=bash tests/core-parser.sh -->
 
 ### Requirements
 
@@ -17,8 +17,8 @@ Build the first minimal parser.
 
 Generate a JSON and Markdown report from parser output.
 
-<!-- codex:read=examples/reporting-notes.md -->
-<!-- codex:verify=bash tests/report-writer.sh -->
+<!-- runner:read=examples/reporting-notes.md -->
+<!-- runner:verify=bash tests/report-writer.sh -->
 
 ### Requirements
 
@@ -29,7 +29,7 @@ Generate a JSON and Markdown report from parser output.
 
 Add a small dashboard widget that surfaces the latest report.
 
-<!-- codex:verify=bash tests/dashboard-widget.sh -->
+<!-- runner:verify=bash tests/dashboard-widget.sh -->
 
 ### Requirements
 

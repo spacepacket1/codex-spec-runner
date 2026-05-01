@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.3"
+VERSION="0.2.0"
 ROOT_DIR="${ROOT_DIR:-$(pwd)}"
 STATE_DIR="${STATE_DIR:-${ROOT_DIR}/.codex-spec-runner}"
 CONTEXT_FILE="${CONTEXT_FILE:-${STATE_DIR}/context.md}"
 MANIFEST_FILE="${MANIFEST_FILE:-${STATE_DIR}/manifest.tsv}"
 SUMMARY_DIR="${SUMMARY_DIR:-${STATE_DIR}/summaries}"
+PROVIDER="${PROVIDER:-codex}"
 CODEX_BIN="${CODEX_BIN:-codex}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"
 USE_SHARED_CONTEXT="${USE_SHARED_CONTEXT:-1}"
 USE_PHASE_SUMMARIES="${USE_PHASE_SUMMARIES:-1}"
@@ -16,35 +18,41 @@ SANDBOX_MODE="${SANDBOX_MODE:-workspace-write}"
 APPROVAL_POLICY="${APPROVAL_POLICY:-on-request}"
 MODE="${MODE:-exec}"
 CODEX_EPHEMERAL="${CODEX_EPHEMERAL:-1}"
-DEFAULT_MODEL="${DEFAULT_MODEL:-gpt-5.4}"
-HIGH_MODEL="${HIGH_MODEL:-gpt-5.5}"
-MINI_MODEL="${MINI_MODEL:-gpt-5.4-mini}"
+CODEX_SKIP_GIT_REPO_CHECK="${CODEX_SKIP_GIT_REPO_CHECK:-0}"
+CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-default}"
+CLAUDE_NO_SESSION_PERSISTENCE="${CLAUDE_NO_SESSION_PERSISTENCE:-1}"
+ADD_DIRS="${ADD_DIRS:-${CODEX_ADD_DIRS:-}}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-}"
+HIGH_MODEL="${HIGH_MODEL:-}"
+MINI_MODEL="${MINI_MODEL:-}"
 MODEL_OVERRIDES="${MODEL_OVERRIDES:-}"
 COMMON_READ_FILES="${COMMON_READ_FILES:-package.json}"
 
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/runSpecPhasesCodex.sh <spec.md> <all|phase-number> [options]
+  codex-spec-runner <spec.md> <all|phase-number> [options]
 
 Options:
   --from <n>           Start phase for "all"
   --to <n>             End phase for "all"
+  --provider <name>    Provider to run: codex or claude
   --preflight          Run input/environment checks and exit
   --prepare-context    Write shared repo context and exit
   --refresh-context    Regenerate shared repo context before running phases
-  --dry-run            Show selected phase status instead of running Codex
-  --verbose            Print full generated prompts and allow detailed Codex output
-  --list               List detected phases and selected models
+  --dry-run            Show selected phase status instead of running the provider
+  --verbose            Print full generated prompts and allow detailed provider output
+  --list               List detected phases with provider and model
   --read <path>        Add a file to the "Start by reading" list; repeatable
   --version            Print the runner version
   -h, --help           Show this help
 
 Examples:
-  scripts/runSpecPhasesCodex.sh docs/feature-ticket.md --list
-  scripts/runSpecPhasesCodex.sh docs/feature-ticket.md 3 --dry-run
-  scripts/runSpecPhasesCodex.sh docs/feature-ticket.md all --from 4 --to 8
-  MODEL_OVERRIDES="4:gpt-5.5,7:gpt-5.4-mini" scripts/runSpecPhasesCodex.sh docs/feature-ticket.md all
+  codex-spec-runner docs/feature-ticket.md --list
+  codex-spec-runner docs/feature-ticket.md 3 --dry-run
+  codex-spec-runner docs/feature-ticket.md all --from 4 --to 8
+  codex-spec-runner docs/feature-ticket.md 3 --provider claude
+  MODEL_OVERRIDES="4:gpt-5.5,7:claude:sonnet" codex-spec-runner docs/feature-ticket.md all
 
 Environment overrides:
   ROOT_DIR=/path/to/repo
@@ -52,7 +60,9 @@ Environment overrides:
   CONTEXT_FILE=/path/to/repo/.codex-spec-runner/context.md
   MANIFEST_FILE=/path/to/repo/.codex-spec-runner/manifest.tsv
   SUMMARY_DIR=/path/to/repo/.codex-spec-runner/summaries
+  PROVIDER=codex
   CODEX_BIN=codex
+  CLAUDE_BIN=claude
   SKIP_PREFLIGHT=0
   USE_SHARED_CONTEXT=1
   USE_PHASE_SUMMARIES=1
@@ -61,10 +71,14 @@ Environment overrides:
   APPROVAL_POLICY=on-request
   MODE=exec
   CODEX_EPHEMERAL=1
-  DEFAULT_MODEL=gpt-5.4
-  HIGH_MODEL=gpt-5.5
-  MINI_MODEL=gpt-5.4-mini
-  MODEL_OVERRIDES="phase:model,phase:model"
+  CODEX_SKIP_GIT_REPO_CHECK=0
+  CLAUDE_PERMISSION_MODE=default
+  CLAUDE_NO_SESSION_PERSISTENCE=1
+  ADD_DIRS="/path/to/extra/repo /path/to/output"
+  DEFAULT_MODEL=<provider default>
+  HIGH_MODEL=<provider high>
+  MINI_MODEL=<provider mini>
+  MODEL_OVERRIDES="phase:model,phase:provider:model"
   COMMON_READ_FILES="package.json pipeline.js server.js"
 
 Expected spec format:
@@ -73,9 +87,9 @@ Expected spec format:
     ## 6. Phase 2 - Walk-Forward Validation
 
 Notes:
-  - Each phase starts a fresh non-interactive Codex session.
+  - Each phase starts a fresh non-interactive provider session.
   - "all" runs detected phases in numeric order, optionally bounded by --from/--to.
-  - Model selection is heuristic and intentionally conservative; use MODEL_OVERRIDES for exact routing.
+  - Model selection is heuristic and intentionally conservative; use MODEL_OVERRIDES for exact provider/model routing.
 USAGE
 }
 
@@ -86,6 +100,51 @@ die() {
 
 warn() {
   echo "warning: $*" >&2
+}
+
+provider_bin() {
+  local provider="${1:-$PROVIDER}"
+  case "$provider" in
+    codex) printf '%s\n' "$CODEX_BIN" ;;
+    claude) printf '%s\n' "$CLAUDE_BIN" ;;
+    *) die "unsupported provider: $provider" ;;
+  esac
+}
+
+provider_display_name() {
+  local provider="${1:-$PROVIDER}"
+  case "$provider" in
+    codex) printf '%s\n' "Codex" ;;
+    claude) printf '%s\n' "Claude" ;;
+    *) die "unsupported provider: $provider" ;;
+  esac
+}
+
+provider_default_model() {
+  local provider="${1:-$PROVIDER}"
+  case "$provider" in
+    codex) printf '%s\n' "${DEFAULT_MODEL:-gpt-5.4}" ;;
+    claude) printf '%s\n' "${DEFAULT_MODEL:-sonnet}" ;;
+    *) die "unsupported provider: $provider" ;;
+  esac
+}
+
+provider_high_model() {
+  local provider="${1:-$PROVIDER}"
+  case "$provider" in
+    codex) printf '%s\n' "${HIGH_MODEL:-gpt-5.5}" ;;
+    claude) printf '%s\n' "${HIGH_MODEL:-opus}" ;;
+    *) die "unsupported provider: $provider" ;;
+  esac
+}
+
+provider_mini_model() {
+  local provider="${1:-$PROVIDER}"
+  case "$provider" in
+    codex) printf '%s\n' "${MINI_MODEL:-gpt-5.4-mini}" ;;
+    claude) printf '%s\n' "${MINI_MODEL:-haiku}" ;;
+    *) die "unsupported provider: $provider" ;;
+  esac
 }
 
 ensure_state_dir() {
@@ -211,20 +270,22 @@ write_manifest_row() {
   local timestamp="$1"
   local phase="$2"
   local title="$3"
-  local model="$4"
-  local dry_run="$5"
-  local exit_status="$6"
+  local provider_name="$4"
+  local model="$5"
+  local dry_run="$6"
+  local exit_status="$7"
 
   if [[ ! -d "$STATE_DIR" ]] && ! mkdir -p "$STATE_DIR"; then
     warn "failed to prepare state directory for manifest: $STATE_DIR"
     return 1
   fi
 
-  if ! printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  if ! printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(manifest_field "$timestamp")" \
     "$(manifest_field "$SPEC_FILE")" \
     "$(manifest_field "$phase")" \
     "$(manifest_field "$title")" \
+    "$(manifest_field "$provider_name")" \
     "$(manifest_field "$model")" \
     "$(manifest_field "$MODE")" \
     "$(manifest_field "$dry_run")" \
@@ -287,8 +348,9 @@ write_phase_summary() {
   local timestamp="$1"
   local phase="$2"
   local title="$3"
-  local model="$4"
-  local exit_status="$5"
+  local provider_name="$4"
+  local model="$5"
+  local exit_status="$6"
   local summary_file_path human_notes
 
   summary_file_path="$(summary_file "$phase")"
@@ -308,6 +370,7 @@ write_phase_summary() {
     echo
     echo "- Phase: ${phase}"
     echo "- Title: ${title}"
+    echo "- Provider: ${provider_name}"
     echo "- Model: ${model}"
     echo "- Completed: ${timestamp}"
     echo "- Exit status: ${exit_status}"
@@ -565,38 +628,79 @@ trim_whitespace() {
 
 phase_annotations() {
   local phase="$1"
-  local line key value trimmed_line
+  local line source key value trimmed_line
 
   while IFS= read -r line; do
     trimmed_line="$(trim_whitespace "$line")"
-    if [[ "$trimmed_line" =~ ^\<\!--[[:space:]]*codex:([[:alnum:]_-]+)=(.*)--\>$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      value="$(trim_whitespace "${BASH_REMATCH[2]}")"
+    if [[ "$trimmed_line" =~ ^\<\!--[[:space:]]*(codex|claude|runner):([[:alnum:]_-]+)=(.*)--\>$ ]]; then
+      source="${BASH_REMATCH[1]}"
+      key="${BASH_REMATCH[2]}"
+      value="$(trim_whitespace "${BASH_REMATCH[3]}")"
       [[ -n "$value" ]] || continue
-      printf '%s\t%s\n' "$key" "$value"
+      printf '%s\t%s\t%s\n' "$source" "$key" "$value"
     fi
   done < <(extract_phase_body "$phase")
 }
 
-annotation_model() {
-  local phase="$1"
-  local key value selected=""
+resolve_model_value() {
+  local value="$1"
+  local provider="${2:-$PROVIDER}"
+  case "$value" in
+    high) provider_high_model "$provider" ;;
+    default) provider_default_model "$provider" ;;
+    mini) provider_mini_model "$provider" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
 
-  while IFS=$'\t' read -r key value; do
-    if [[ "$key" == "model" ]]; then
-      selected="$value"
+parse_execution_target() {
+  local value="$1"
+  local fallback_provider="${2:-$PROVIDER}"
+  local provider model
+
+  case "$value" in
+    codex:*|claude:*)
+      provider="${value%%:*}"
+      model="${value#*:}"
+      ;;
+    *)
+      provider="$fallback_provider"
+      model="$value"
+      ;;
+  esac
+
+  case "$provider" in
+    codex|claude)
+      ;;
+    *)
+      die "unsupported provider in execution target: $provider"
+      ;;
+  esac
+
+  printf '%s\t%s\n' "$provider" "$(resolve_model_value "$model" "$provider")"
+}
+
+annotation_execution_target() {
+  local phase="$1"
+  local default_provider="${2:-$PROVIDER}"
+  local source key value selected=""
+  local selected_provider="$default_provider"
+
+  while IFS=$'\t' read -r source key value; do
+    if [[ "$key" == "model" && ( "$source" == "runner" || "$source" == "$default_provider" ) ]]; then
+      IFS=$'\t' read -r selected_provider selected <<< "$(parse_execution_target "$value" "$default_provider")"
     fi
   done < <(phase_annotations "$phase")
 
   [[ -n "$selected" ]] || return 1
-  printf '%s\n' "$selected"
+  printf '%s\t%s\n' "$selected_provider" "$selected"
 }
 
 annotation_read_files() {
   local phase="$1"
-  local key value
+  local source key value
 
-  while IFS=$'\t' read -r key value; do
+  while IFS=$'\t' read -r source key value; do
     if [[ "$key" == "read" ]]; then
       printf '%s\n' "$value"
     fi
@@ -605,9 +709,9 @@ annotation_read_files() {
 
 verification_hints_block() {
   local phase="$1"
-  local key value found="0"
+  local source key value found="0"
 
-  while IFS=$'\t' read -r key value; do
+  while IFS=$'\t' read -r source key value; do
     if [[ "$key" == "verify" ]]; then
       if [[ "$found" == "0" ]]; then
         echo "Verification hints:"
@@ -618,8 +722,9 @@ verification_hints_block() {
   done < <(phase_annotations "$phase")
 }
 
-override_model() {
+override_execution_target() {
   local phase="$1"
+  local default_provider="${2:-$PROVIDER}"
   local item key value
   [[ -n "$MODEL_OVERRIDES" ]] || return 1
   local items=()
@@ -628,18 +733,16 @@ override_model() {
     key="${item%%:*}"
     value="${item#*:}"
     if [[ "$key" == "$phase" && -n "$value" && "$value" != "$item" ]]; then
-      echo "$value"
+      parse_execution_target "$value" "$default_provider"
       return 0
     fi
   done
   return 1
 }
 
-phase_model() {
+phase_model_tier() {
   local phase="$1"
   local title body lower title_lower
-  if override_model "$phase"; then return 0; fi
-  if annotation_model "$phase"; then return 0; fi
 
   title="$(phase_title "$phase")"
   title_lower="$(printf '%s\n' "$title" | tr '[:upper:]' '[:lower:]')"
@@ -647,16 +750,47 @@ phase_model() {
   lower="$(printf '%s\n%s\n' "$title" "$body" | tr '[:upper:]' '[:lower:]')"
 
   if grep -Eq 'custody|wallet|key-management|liquidity|routing|mev|gas|reconciliation|accounting|tax|compliance|permission|audit' <<< "$title_lower"; then
-    echo "$HIGH_MODEL"
+    echo "high"
   elif grep -Eq 'dashboard|operations|monitoring|alerts|incidents|analytics|data quality|risk engine|token.*scanner|execution simulation|historical|backtesting|walk-forward|promotion' <<< "$title_lower"; then
-    echo "$DEFAULT_MODEL"
+    echo "default"
   elif grep -Eq 'private key|key-management|live routing|cancel/replace|cancel and replace|mev|gas-aware|tax-lot|reconciliation|compliance|operator permission' <<< "$lower"; then
-    echo "$HIGH_MODEL"
+    echo "high"
   elif grep -Eq 'small ui|minor ui|simple api|copy change|documentation only|docs only' <<< "$lower"; then
-    echo "$MINI_MODEL"
+    echo "mini"
   else
-    echo "$DEFAULT_MODEL"
+    echo "default"
   fi
+}
+
+phase_execution_target() {
+  local phase="$1"
+  local default_provider="${2:-$PROVIDER}"
+  local tier
+  if override_execution_target "$phase" "$default_provider"; then return 0; fi
+  if annotation_execution_target "$phase" "$default_provider"; then return 0; fi
+  tier="$(phase_model_tier "$phase")"
+  case "$tier" in
+    high) printf '%s\t%s\n' "$default_provider" "$(provider_high_model "$default_provider")" ;;
+    mini) printf '%s\t%s\n' "$default_provider" "$(provider_mini_model "$default_provider")" ;;
+    default) printf '%s\t%s\n' "$default_provider" "$(provider_default_model "$default_provider")" ;;
+    *) die "unsupported model tier: $tier" ;;
+  esac
+}
+
+phase_provider() {
+  local phase="$1"
+  local default_provider="${2:-$PROVIDER}"
+  local provider model
+  IFS=$'\t' read -r provider model <<< "$(phase_execution_target "$phase" "$default_provider")"
+  printf '%s\n' "$provider"
+}
+
+phase_model() {
+  local phase="$1"
+  local default_provider="${2:-$PROVIDER}"
+  local provider model
+  IFS=$'\t' read -r provider model <<< "$(phase_execution_target "$phase" "$default_provider")"
+  printf '%s\n' "$model"
 }
 
 read_files_block() {
@@ -729,12 +863,13 @@ EOF
 }
 
 list_phases() {
-  local index phase title model
+  local index phase title provider model
   for index in "${!PHASE_ORDER[@]}"; do
     phase="${PHASE_ORDER[$index]}"
     title="${PHASE_TITLES[$index]}"
+    provider="$(phase_provider "$phase")"
     model="$(phase_model "$phase")"
-    printf 'Phase %s\t%s\t%s\n' "$phase" "$model" "$title"
+    printf 'Phase %s\t%s\t%s\t%s\n' "$phase" "$provider" "$model" "$title"
   done
 }
 
@@ -755,6 +890,11 @@ run_preflight() {
   local phase file resolved_path selected=0
   local common_files=()
   local common_file
+  local phase_provider_name provider_name provider_bin_path
+  local provider model
+  local seen_codex=0 seen_claude=0
+  local -a add_dirs=()
+  local add_dir
 
   if [[ -f "$SPEC_FILE" ]]; then
     preflight_note "ok" "spec file exists: $SPEC_FILE"
@@ -768,22 +908,6 @@ run_preflight() {
   else
     preflight_note "error" "root directory not found or not a directory: $ROOT_DIR"
     errors=$((errors + 1))
-  fi
-
-  if [[ "$CODEX_BIN" == */* ]]; then
-    if [[ -x "$CODEX_BIN" ]]; then
-      preflight_note "ok" "Codex binary is executable: $CODEX_BIN"
-    else
-      preflight_note "error" "Codex binary is not executable: $CODEX_BIN"
-      errors=$((errors + 1))
-    fi
-  else
-    if command -v "$CODEX_BIN" >/dev/null 2>&1; then
-      preflight_note "ok" "Codex binary found on PATH: $CODEX_BIN"
-    else
-      preflight_note "error" "Codex binary not found on PATH: $CODEX_BIN"
-      errors=$((errors + 1))
-    fi
   fi
 
   if [[ -f "$SPEC_FILE" ]]; then
@@ -877,6 +1001,69 @@ run_preflight() {
     done
   fi
 
+  if [[ -n "$TARGET" ]]; then
+    if [[ "$TARGET" == "all" ]]; then
+      for phase in "${PHASE_ORDER[@]}"; do
+        if (( phase >= FROM_PHASE && phase <= TO_PHASE )); then
+          IFS=$'\t' read -r provider model <<< "$(phase_execution_target "$phase")"
+          case "$provider" in
+            codex) seen_codex=1 ;;
+            claude) seen_claude=1 ;;
+          esac
+        fi
+      done
+    elif [[ "$TARGET" =~ ^[0-9]+$ ]] && phase_exists "$TARGET"; then
+      IFS=$'\t' read -r provider model <<< "$(phase_execution_target "$TARGET")"
+      case "$provider" in
+        codex) seen_codex=1 ;;
+        claude) seen_claude=1 ;;
+      esac
+    fi
+  fi
+
+  for provider in codex claude; do
+    if [[ "$provider" == "codex" && "$seen_codex" != "1" ]]; then
+      continue
+    fi
+    if [[ "$provider" == "claude" && "$seen_claude" != "1" ]]; then
+      continue
+    fi
+
+    provider_name="$(provider_display_name "$provider")"
+    provider_bin_path="$(provider_bin "$provider")"
+    phase_provider_name="$(printf '%s\n' "$provider" | tr '[:lower:]' '[:upper:]')"
+
+    if [[ "$provider_bin_path" == */* ]]; then
+      if [[ -x "$provider_bin_path" ]]; then
+        preflight_note "ok" "${provider_name} binary is executable: $provider_bin_path"
+      else
+        preflight_note "error" "${provider_name} binary is not executable: $provider_bin_path"
+        errors=$((errors + 1))
+      fi
+    else
+      if command -v "$provider_bin_path" >/dev/null 2>&1; then
+        preflight_note "ok" "${provider_name} binary found on PATH: $provider_bin_path"
+      else
+        preflight_note "error" "${provider_name} binary not found on PATH: $provider_bin_path"
+        errors=$((errors + 1))
+      fi
+    fi
+  done
+
+  if [[ -n "$ADD_DIRS" ]]; then
+    # shellcheck disable=SC2206
+    add_dirs=($ADD_DIRS)
+    for add_dir in "${add_dirs[@]}"; do
+      [[ -n "$add_dir" ]] || continue
+      if [[ -d "$add_dir" ]]; then
+        preflight_note "ok" "provider add-dir exists: $add_dir"
+      else
+        preflight_note "error" "provider add-dir not found or not a directory: $add_dir"
+        errors=$((errors + 1))
+      fi
+    done
+  fi
+
   if (( errors > 0 )); then
     preflight_note "result" "failed with ${errors} error(s), ${warnings} warning(s)"
     return 1
@@ -885,22 +1072,103 @@ run_preflight() {
   preflight_note "result" "ok${warnings:+ with ${warnings} warning(s)}"
 }
 
+run_codex_phase() {
+  local phase="$1"
+  local verbose="$2"
+  local model="$3"
+  local exit_status
+  local -a codex_args=()
+  local -a add_dirs=()
+  local add_dir
+
+  echo "Status: starting Codex phase run."
+  codex_args=(
+    --ask-for-approval "$APPROVAL_POLICY"
+    "$MODE"
+  )
+  if [[ "$CODEX_EPHEMERAL" == "1" ]]; then
+    codex_args+=(--ephemeral)
+  fi
+  if [[ "$CODEX_SKIP_GIT_REPO_CHECK" == "1" ]]; then
+    codex_args+=(--skip-git-repo-check)
+  fi
+  if [[ -n "$ADD_DIRS" ]]; then
+    # shellcheck disable=SC2206
+    add_dirs=($ADD_DIRS)
+    for add_dir in "${add_dirs[@]}"; do
+      [[ -n "$add_dir" ]] || continue
+      codex_args+=(--add-dir "$add_dir")
+    done
+  fi
+  codex_args+=(
+    --model "$model"
+    --cd "$ROOT_DIR"
+    --sandbox "$SANDBOX_MODE"
+    -
+  )
+
+  if phase_prompt "$phase" "$verbose" | "$CODEX_BIN" "${codex_args[@]}"; then
+    exit_status=0
+  else
+    exit_status=$?
+  fi
+
+  return "$exit_status"
+}
+
+run_claude_phase() {
+  local phase="$1"
+  local verbose="$2"
+  local model="$3"
+  local exit_status
+  local -a claude_args=()
+  local -a add_dirs=()
+  local add_dir
+
+  echo "Status: starting Claude phase run."
+  claude_args=(
+    --print
+    --model "$model"
+    --permission-mode "$CLAUDE_PERMISSION_MODE"
+  )
+  if [[ "$CLAUDE_NO_SESSION_PERSISTENCE" == "1" ]]; then
+    claude_args+=(--no-session-persistence)
+  fi
+  if [[ -n "$ADD_DIRS" ]]; then
+    # shellcheck disable=SC2206
+    add_dirs=($ADD_DIRS)
+    for add_dir in "${add_dirs[@]}"; do
+      [[ -n "$add_dir" ]] || continue
+      claude_args+=(--add-dir "$add_dir")
+    done
+  fi
+
+  if phase_prompt "$phase" "$verbose" | "$CLAUDE_BIN" "${claude_args[@]}"; then
+    exit_status=0
+  else
+    exit_status=$?
+  fi
+
+  return "$exit_status"
+}
+
 run_phase() {
   local phase="$1"
   local dry_run="$2"
   local verbose="${3:-0}"
-  local model title timestamp exit_status
-  local codex_args=()
+  local provider model title timestamp exit_status provider_name
   title="$(phase_title "$phase")"
   [[ -n "$title" ]] || die "phase not found in spec: $phase"
-  model="$(phase_model "$phase")"
+  IFS=$'\t' read -r provider model <<< "$(phase_execution_target "$phase")"
+  provider_name="$(provider_display_name "$provider")"
   timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 
   echo "== Phase ${phase}: ${title} =="
+  echo "Provider: ${provider}"
   echo "Model: ${model}"
 
   if [[ "$dry_run" == "1" ]]; then
-    echo "Status: dry-run only; Codex was not started."
+    echo "Status: dry-run only; ${provider_name} was not started."
     if [[ "$verbose" == "1" ]]; then
       echo "--- prompt ---"
       phase_prompt "$phase" "$verbose"
@@ -908,30 +1176,23 @@ run_phase() {
     fi
     exit_status=0
   else
-    echo "Status: starting Codex phase run."
-    codex_args=(
-      --ask-for-approval "$APPROVAL_POLICY"
-      "$MODE"
-    )
-    if [[ "$CODEX_EPHEMERAL" == "1" ]]; then
-      codex_args+=(--ephemeral)
-    fi
-    codex_args+=(
-      --model "$model"
-      --cd "$ROOT_DIR"
-      --sandbox "$SANDBOX_MODE"
-      -
-    )
-
-    if phase_prompt "$phase" "$verbose" | "$CODEX_BIN" "${codex_args[@]}"; then
-      exit_status=0
-    else
-      exit_status=$?
-    fi
+    case "$provider" in
+      codex)
+        run_codex_phase "$phase" "$verbose" "$model"
+        exit_status=$?
+        ;;
+      claude)
+        run_claude_phase "$phase" "$verbose" "$model"
+        exit_status=$?
+        ;;
+      *)
+        die "unsupported provider: $PROVIDER"
+        ;;
+    esac
   fi
 
-  write_manifest_row "$timestamp" "$phase" "$title" "$model" "$dry_run" "$exit_status" || true
-  write_phase_summary "$timestamp" "$phase" "$title" "$model" "$exit_status" || true
+  write_manifest_row "$timestamp" "$phase" "$title" "$provider" "$model" "$dry_run" "$exit_status" || true
+  write_phase_summary "$timestamp" "$phase" "$title" "$provider" "$model" "$exit_status" || true
   if [[ "$exit_status" == "0" ]]; then
     echo "Status: phase ${phase} completed."
   else
@@ -1019,6 +1280,15 @@ while [[ $# -gt 0 ]]; do
       TO_PHASE="${1#--to=}"
       shift
       ;;
+    --provider)
+      [[ $# -ge 2 ]] || die "--provider requires a value"
+      PROVIDER="$2"
+      shift 2
+      ;;
+    --provider=*)
+      PROVIDER="${1#--provider=}"
+      shift
+      ;;
     --read)
       [[ $# -ge 2 ]] || die "--read requires a path"
       EXTRA_READ_FILES+=("$2")
@@ -1041,6 +1311,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+case "$PROVIDER" in
+  codex|claude)
+    ;;
+  *)
+    die "unsupported provider: $PROVIDER"
+    ;;
+esac
 
 require_spec
 load_phase_metadata

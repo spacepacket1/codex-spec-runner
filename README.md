@@ -1,25 +1,26 @@
 # codex-spec-runner
 
-Run Codex CLI phase-by-phase from Markdown feature specs with model routing, shared context, and resumable execution.
+Run Codex CLI or Claude CLI phase-by-phase from Markdown feature specs with model routing, shared context, and resumable execution.
 
-Current version: `0.1.3`
+Current version: `0.2.0`
 
-`codex-spec-runner` turns a phased Markdown spec into separate Codex CLI runs. Each phase gets a fresh conversation, a focused prompt, and a model selected from conservative defaults or explicit overrides.
+`codex-spec-runner` turns a phased Markdown spec into separate provider runs. Each phase gets a fresh conversation, a focused prompt, and a model selected from conservative defaults or explicit overrides.
 
 ## Why
 
-Large implementation specs can waste context when every phase runs in one long conversation. This runner keeps each phase isolated so Codex starts with only the relevant spec section, the current working tree, and the files you tell it to read first.
+Large implementation specs can waste context when every phase runs in one long conversation. This runner keeps each phase isolated so the selected provider starts with only the relevant spec section, the current working tree, and the files you tell it to read first.
 
 ## Requirements
 
 - Bash
 - `awk`, `grep`, `sort`
-- Codex CLI installed and authenticated for normal execution and `--preflight`
+- Codex CLI and/or Claude CLI installed and authenticated for normal execution and `--preflight`
 
-Check Codex CLI:
+Check provider CLIs:
 
 ```bash
 codex --help
+claude --help
 ```
 
 ## Install
@@ -49,14 +50,21 @@ The spec should be Markdown with phase headings that include a phase number:
 ```
 
 The runner extracts each phase section from its heading until the next phase heading.
-Phase metadata is parsed once per runner process, sorted numerically, and duplicate phase numbers fail before Codex is launched.
+Phase metadata is parsed once per runner process, sorted numerically, and duplicate phase numbers fail before the provider is launched.
 
 ## Usage
 
-List phases and selected models:
+List phases with provider and model:
 
 ```bash
 codex-spec-runner docs/feature-ticket.md --list
+```
+
+This prints provider and model per phase, for example:
+
+```text
+Phase 1  codex   gpt-5.4-mini  Core Parser
+Phase 2  claude  sonnet        Report Writer
 ```
 
 Print the installed runner version:
@@ -76,6 +84,14 @@ Print the full generated prompt for debugging:
 ```bash
 codex-spec-runner docs/feature-ticket.md 3 --dry-run --verbose
 ```
+
+Run one phase with Claude:
+
+```bash
+codex-spec-runner docs/feature-ticket.md 3 --provider claude
+```
+
+`--provider` sets the default provider for phases that do not have a mixed-provider override.
 
 Run preflight checks only:
 
@@ -119,7 +135,7 @@ Run a bounded range:
 codex-spec-runner docs/feature-ticket.md all --from 4 --to 8
 ```
 
-Add files Codex should read first:
+Add files the provider should read first:
 
 ```bash
 codex-spec-runner docs/feature-ticket.md 5 \
@@ -137,7 +153,7 @@ codex-spec-runner docs/feature-ticket.md all
 ```
 
 Use `--refresh-context` when the repo changed enough that the shared context should be regenerated before execution.
-Normal non-dry-run execution runs preflight automatically unless `SKIP_PREFLIGHT=1`; `--dry-run` remains usable without Codex installed.
+Normal non-dry-run execution runs preflight automatically unless `SKIP_PREFLIGHT=1`; `--dry-run` remains usable without the provider installed.
 
 ## Runtime State
 
@@ -166,29 +182,44 @@ Specs can override a phase model, add extra read files, and include verification
 ```md
 ## Phase 2 - Report Writer
 
-<!-- codex:model=gpt-5.4-mini -->
-<!-- codex:read=docs/reporting-notes.md -->
-<!-- codex:verify=bash tests/reporting.sh -->
+<!-- runner:model=mini -->
+<!-- runner:read=docs/reporting-notes.md -->
+<!-- runner:verify=bash tests/reporting.sh -->
 ```
 
-- `codex:model` overrides heuristic routing for that phase
-- `codex:read` adds files to the "Read first" block
-- `codex:verify` adds prompt-only verification hints
+- `runner:model` overrides heuristic routing for that phase across providers
+- `runner:read` adds files to the "Read first" block
+- `runner:verify` adds prompt-only verification hints
+- legacy `codex:*` annotations are still accepted; `codex:model` only applies when `PROVIDER=codex`
 
 See [examples/feature-ticket.md](examples/feature-ticket.md) for a complete example.
 
 ## Model Routing
 
-Default routing is intentionally conservative:
+Default routing is intentionally conservative and tiered:
 
-- `gpt-5.5` for phases whose title suggests custody, wallets, routing, MEV/gas, reconciliation/accounting/tax, compliance, audit, or permissions.
-- `gpt-5.4` for most implementation phases.
-- `gpt-5.4-mini` is available for explicit overrides.
+- `high` for phases whose title suggests custody, wallets, routing, MEV/gas, reconciliation/accounting/tax, compliance, audit, or permissions
+- `default` for most implementation phases
+- `mini` for explicitly lightweight work
+
+Provider defaults:
+
+- Codex: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`
+- Claude: `opus`, `sonnet`, `haiku`
+
+`runner:model=high|default|mini` is the preferred provider-neutral form. Exact model names are still supported when you want provider-specific routing.
 
 Override exact phase-to-model mapping:
 
 ```bash
 MODEL_OVERRIDES="4:gpt-5.5,14:gpt-5.4-mini" \
+  codex-spec-runner docs/feature-ticket.md all
+```
+
+Override exact phase-to-provider-and-model mapping:
+
+```bash
+MODEL_OVERRIDES="1:codex:gpt-5.4,2:claude:sonnet" \
   codex-spec-runner docs/feature-ticket.md all
 ```
 
@@ -203,10 +234,11 @@ MINI_MODEL=gpt-5.4-mini \
 
 ## Configuration
 
-The runner invokes Codex like this:
+The runner invokes the selected provider like this:
 
 ```bash
-codex --ask-for-approval "$APPROVAL_POLICY" exec --ephemeral --model "$model" --cd "$ROOT_DIR" --sandbox "$SANDBOX_MODE" -
+PROVIDER=codex codex --ask-for-approval "$APPROVAL_POLICY" exec [--ephemeral] [--skip-git-repo-check] [--add-dir ...] --model "$model" --cd "$ROOT_DIR" --sandbox "$SANDBOX_MODE" -
+PROVIDER=claude claude --print --model "$model" --permission-mode "$CLAUDE_PERMISSION_MODE" [--no-session-persistence] [--add-dir ...]
 ```
 
 Environment overrides:
@@ -217,7 +249,9 @@ STATE_DIR=/path/to/repo/.codex-spec-runner
 CONTEXT_FILE=/path/to/repo/.codex-spec-runner/context.md
 MANIFEST_FILE=/path/to/repo/.codex-spec-runner/manifest.tsv
 SUMMARY_DIR=/path/to/repo/.codex-spec-runner/summaries
+PROVIDER=codex
 CODEX_BIN=codex
+CLAUDE_BIN=claude
 SKIP_PREFLIGHT=0
 USE_SHARED_CONTEXT=1
 USE_PHASE_SUMMARIES=1
@@ -226,36 +260,45 @@ SANDBOX_MODE=workspace-write
 APPROVAL_POLICY=on-request
 MODE=exec
 CODEX_EPHEMERAL=1
-DEFAULT_MODEL=gpt-5.4
-HIGH_MODEL=gpt-5.5
-MINI_MODEL=gpt-5.4-mini
-MODEL_OVERRIDES="4:gpt-5.5,14:gpt-5.4-mini"
+CODEX_SKIP_GIT_REPO_CHECK=0
+CLAUDE_PERMISSION_MODE=default
+CLAUDE_NO_SESSION_PERSISTENCE=1
+ADD_DIRS="/path/to/extra/repo /path/to/output"
+DEFAULT_MODEL=<provider default>
+HIGH_MODEL=<provider high>
+MINI_MODEL=<provider mini>
+MODEL_OVERRIDES="4:gpt-5.5,14:claude:sonnet"
 COMMON_READ_FILES="package.json pipeline.js server.js"
 ```
 
 - `STATE_DIR`, `CONTEXT_FILE`, `MANIFEST_FILE`, `SUMMARY_DIR`: runtime-state paths under `.codex-spec-runner/`
-- `CODEX_BIN`: Codex CLI binary name or path
+- `PROVIDER`: `codex` or `claude`
+- `CODEX_BIN`, `CLAUDE_BIN`: provider CLI binary name or path
 - `SKIP_PREFLIGHT`: set to `1` to skip automatic preflight on normal runs
 - `USE_SHARED_CONTEXT`: set to `0` to omit `context.md` from prompts
 - `USE_PHASE_SUMMARIES`: set to `0` to omit prior phase summaries from later prompts
 - `SUMMARY_LOOKBACK`: number of previous successful summaries to include during `all`
-- `SANDBOX_MODE`, `APPROVAL_POLICY`, `MODE`: passed through to Codex CLI
+- `SANDBOX_MODE`, `APPROVAL_POLICY`, `MODE`: Codex-only execution settings
 - `CODEX_EPHEMERAL`: set to `0` to let Codex persist phase sessions; default `1` avoids stale session persistence during runner-managed phase runs
-- `DEFAULT_MODEL`, `HIGH_MODEL`, `MINI_MODEL`: default routed model names
-- `MODEL_OVERRIDES`: exact `phase:model` mapping that beats heuristic routing and spec annotations
+- `CODEX_SKIP_GIT_REPO_CHECK`: set to `1` to pass `--skip-git-repo-check` to `codex exec`
+- `CLAUDE_PERMISSION_MODE`: passed to `claude --permission-mode`
+- `CLAUDE_NO_SESSION_PERSISTENCE`: set to `0` to let Claude persist phase sessions
+- `ADD_DIRS`: space-separated directories to pass as repeated `--add-dir` flags to the selected provider
+- `DEFAULT_MODEL`, `HIGH_MODEL`, `MINI_MODEL`: provider-specific default routed model names
+- `MODEL_OVERRIDES`: exact `phase:model` or `phase:provider:model` mapping that beats heuristic routing and spec annotations
 - `COMMON_READ_FILES`: space-separated files to include in every phase prompt when present
 
-By default, runner output stays high level: current phase, model, status, issues, and verification. Pass `--verbose` when you need full generated prompts or detailed Codex output.
+By default, runner output stays high level: current phase, provider, model, status, issues, and verification. Pass `--verbose` when you need full generated prompts or detailed provider output.
 
 Manifest and summary behavior:
 
 - `manifest.tsv` records each attempted phase run, including dry-runs and non-zero exits
-- `summaries/phase-N.md` is updated after each attempted phase with timestamp, model, exit status, and a human-notes section
+- `summaries/phase-N.md` is updated after each attempted phase with timestamp, provider, model, exit status, and a human-notes section
 - later phases in `all` can read recent successful summaries unless `USE_PHASE_SUMMARIES=0`
 
 ## Safety Notes
 
-The generated prompt tells Codex to:
+The generated prompt tells the provider to:
 
 - keep edits scoped to the current phase
 - preserve existing behavior unless the phase requires a change
