@@ -28,13 +28,13 @@ list_output="$(
   cd "$REPO_DIR" &&
   COMMON_READ_FILES="" ROOT_DIR="$TMP_DIR" "$RUNNER" "$SPEC_FILE" --list
 )"
-printf '%s\n' "$list_output" | grep -F $'Phase 1\tgpt-5.4-mini\tSimple API' >/dev/null
+printf '%s\n' "$list_output" | grep -F $'Phase 1\tcodex\tgpt-5.4-mini\tSimple API' >/dev/null
 
 override_output="$(
   cd "$REPO_DIR" &&
   COMMON_READ_FILES="" ROOT_DIR="$TMP_DIR" MODEL_OVERRIDES="1:gpt-5.5" "$RUNNER" "$SPEC_FILE" --list
 )"
-printf '%s\n' "$override_output" | grep -F $'Phase 1\tgpt-5.5\tSimple API' >/dev/null
+printf '%s\n' "$override_output" | grep -F $'Phase 1\tcodex\tgpt-5.5\tSimple API' >/dev/null
 
 dry_run_output="$(
   cd "$REPO_DIR" &&

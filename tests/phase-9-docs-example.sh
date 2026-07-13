@@ -11,7 +11,7 @@ list_output="$(
   cd "$REPO_DIR" &&
   COMMON_READ_FILES="" "$RUNNER" "$SPEC_FILE" --list
 )"
-printf '%s\n' "$list_output" | grep -F $'Phase 1\tgpt-5.4-mini\tCore Parser' >/dev/null
+printf '%s\n' "$list_output" | grep -F $'Phase 1\tcodex\tgpt-5.4-mini\tCore Parser' >/dev/null
 
 dry_run_output="$(
   cd "$REPO_DIR" &&

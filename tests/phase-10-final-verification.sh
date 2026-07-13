@@ -15,7 +15,7 @@ version_output="$(
   cd "$REPO_DIR" &&
   codex-spec-runner --version
 )"
-printf '%s\n' "$version_output" | grep -F "codex-spec-runner 0.2.0" >/dev/null
+printf '%s\n' "$version_output" | grep -F "codex-spec-runner 0.3.0" >/dev/null
 
 list_output="$(
   cd "$REPO_DIR" &&
@@ -100,6 +100,7 @@ chmod +x "$fake_claude"
   cd "$REPO_DIR" &&
   COMMON_READ_FILES="" \
   ROOT_DIR="${TMP_DIR}/root" \
+  RUN_VERIFICATION=0 \
   CODEX_BIN="$fake_codex" \
   CODEX_SKIP_GIT_REPO_CHECK=1 \
   ADD_DIRS="${TMP_DIR}/extra-read ${TMP_DIR}/extra-write" \
@@ -121,6 +122,7 @@ grep -F "Implement Phase 1 (Core Parser)" "$fake_stdin" >/dev/null
   COMMON_READ_FILES="" \
   PROVIDER=claude \
   ROOT_DIR="${TMP_DIR}/root" \
+  RUN_VERIFICATION=0 \
   CLAUDE_BIN="$fake_claude" \
   CLAUDE_PERMISSION_MODE=acceptEdits \
   ADD_DIRS="${TMP_DIR}/extra-read ${TMP_DIR}/extra-write" \
@@ -164,6 +166,7 @@ chmod +x "$mixed_claude"
   cd "$REPO_DIR" &&
   COMMON_READ_FILES="" \
   ROOT_DIR="${TMP_DIR}/root" \
+  RUN_VERIFICATION=0 \
   PROVIDER=codex \
   CODEX_BIN="$mixed_codex" \
   CLAUDE_BIN="$mixed_claude" \

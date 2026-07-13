@@ -2,7 +2,7 @@
 
 Run Codex CLI or Claude CLI phase-by-phase from Markdown feature specs with model routing, shared context, and resumable execution.
 
-Current version: `0.2.0`
+Current version: `0.3.0`
 
 `codex-spec-runner` turns a phased Markdown spec into separate provider runs. Each phase gets a fresh conversation, a focused prompt, and a model selected from conservative defaults or explicit overrides.
 
@@ -165,7 +165,7 @@ Normal non-dry-run execution runs preflight automatically unless `SKIP_PREFLIGHT
 
 Shared context is opt-in for single-phase runs and automatic for `all` runs when `USE_SHARED_CONTEXT=1` and `context.md` does not already exist. It summarizes cheap local facts only: timestamp, root path, git status, top-level layout, detected package/config files, likely verification commands, and configured common read files.
 
-Successful summaries from earlier phases are included in later `all` prompts by default, capped by `SUMMARY_LOOKBACK`.
+Providers are asked to record a concise implementation handoff with changes, decisions, tests, and follow-ups. The runner preserves that handoff, adds independently observed verification results and a worktree snapshot, and includes up to three successful summaries in later `all` prompts by default.
 
 These generated files are safe to delete:
 
@@ -189,7 +189,7 @@ Specs can override a phase model, add extra read files, and include verification
 
 - `runner:model` overrides heuristic routing for that phase across providers
 - `runner:read` adds files to the "Read first" block
-- `runner:verify` adds prompt-only verification hints
+- `runner:verify` tells the provider what to run and is rerun independently by the runner after a successful phase
 - legacy `codex:*` annotations are still accepted; `codex:model` only applies when `PROVIDER=codex`
 
 See [examples/feature-ticket.md](examples/feature-ticket.md) for a complete example.
@@ -198,7 +198,7 @@ See [examples/feature-ticket.md](examples/feature-ticket.md) for a complete exam
 
 Default routing is intentionally conservative and tiered:
 
-- `high` for phases whose title suggests custody, wallets, routing, MEV/gas, reconciliation/accounting/tax, compliance, audit, or permissions
+- `high` for architecture, security, migration, review/release, custody, routing, reconciliation, compliance, audit, and other high-risk phases
 - `default` for most implementation phases
 - `mini` for explicitly lightweight work
 
@@ -255,7 +255,9 @@ CLAUDE_BIN=claude
 SKIP_PREFLIGHT=0
 USE_SHARED_CONTEXT=1
 USE_PHASE_SUMMARIES=1
-SUMMARY_LOOKBACK=1
+SUMMARY_LOOKBACK=3
+RUN_VERIFICATION=1
+VERIFY_SHELL=bash
 SANDBOX_MODE=workspace-write
 APPROVAL_POLICY=on-request
 MODE=exec
@@ -278,6 +280,8 @@ COMMON_READ_FILES="package.json pipeline.js server.js"
 - `USE_SHARED_CONTEXT`: set to `0` to omit `context.md` from prompts
 - `USE_PHASE_SUMMARIES`: set to `0` to omit prior phase summaries from later prompts
 - `SUMMARY_LOOKBACK`: number of previous successful summaries to include during `all`
+- `RUN_VERIFICATION`: set to `0` to skip runner-managed verification after provider execution
+- `VERIFY_SHELL`: shell used with `-lc` for verification commands
 - `SANDBOX_MODE`, `APPROVAL_POLICY`, `MODE`: Codex-only execution settings
 - `CODEX_EPHEMERAL`: set to `0` to let Codex persist phase sessions; default `1` avoids stale session persistence during runner-managed phase runs
 - `CODEX_SKIP_GIT_REPO_CHECK`: set to `1` to pass `--skip-git-repo-check` to `codex exec`
@@ -293,8 +297,11 @@ By default, runner output stays high level: current phase, provider, model, stat
 Manifest and summary behavior:
 
 - `manifest.tsv` records each attempted phase run, including dry-runs and non-zero exits
-- `summaries/phase-N.md` is updated after each attempted phase with timestamp, provider, model, exit status, and a human-notes section
+- `summaries/phase-N.md` is updated after each attempt with the provider handoff, verification results, and current worktree snapshot
 - later phases in `all` can read recent successful summaries unless `USE_PHASE_SUMMARIES=0`
+
+When a phase has one or more `runner:verify` annotations, the commands run in declaration order and the first failure fails the phase and stops an `all` run. Without annotations, the runner conservatively infers one project-level check from common package files or shell tests. Verification is never executed during `--dry-run`.
+Run only trusted specs: verification annotations are shell commands executed from `ROOT_DIR`.
 
 ## Safety Notes
 
@@ -305,7 +312,8 @@ The generated prompt tells the provider to:
 - avoid `node_modules`
 - avoid later phases
 - inspect the working tree when resuming after an interrupted run
-- run verification before finishing
+- generate focused tests and run verification before finishing
+- write a concise handoff for later phases
 
 You should still review diffs after each phase.
 

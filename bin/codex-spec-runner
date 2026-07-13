@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 ROOT_DIR="${ROOT_DIR:-$(pwd)}"
 STATE_DIR="${STATE_DIR:-${ROOT_DIR}/.codex-spec-runner}"
 CONTEXT_FILE="${CONTEXT_FILE:-${STATE_DIR}/context.md}"
@@ -13,7 +13,9 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"
 USE_SHARED_CONTEXT="${USE_SHARED_CONTEXT:-1}"
 USE_PHASE_SUMMARIES="${USE_PHASE_SUMMARIES:-1}"
-SUMMARY_LOOKBACK="${SUMMARY_LOOKBACK:-1}"
+SUMMARY_LOOKBACK="${SUMMARY_LOOKBACK:-3}"
+RUN_VERIFICATION="${RUN_VERIFICATION:-1}"
+VERIFY_SHELL="${VERIFY_SHELL:-bash}"
 SANDBOX_MODE="${SANDBOX_MODE:-workspace-write}"
 APPROVAL_POLICY="${APPROVAL_POLICY:-on-request}"
 MODE="${MODE:-exec}"
@@ -66,7 +68,9 @@ Environment overrides:
   SKIP_PREFLIGHT=0
   USE_SHARED_CONTEXT=1
   USE_PHASE_SUMMARIES=1
-  SUMMARY_LOOKBACK=1
+  SUMMARY_LOOKBACK=3
+  RUN_VERIFICATION=1
+  VERIFY_SHELL=bash
   SANDBOX_MODE=workspace-write
   APPROVAL_POLICY=on-request
   MODE=exec
@@ -89,7 +93,8 @@ Expected spec format:
 Notes:
   - Each phase starts a fresh non-interactive provider session.
   - "all" runs detected phases in numeric order, optionally bounded by --from/--to.
-  - Model selection is heuristic and intentionally conservative; use MODEL_OVERRIDES for exact provider/model routing.
+  - Model selection considers phase role and complexity; use annotations or MODEL_OVERRIDES for exact routing.
+  - Non-dry runs execute phase verification annotations, or conservative inferred checks when none are provided.
 USAGE
 }
 
@@ -258,7 +263,7 @@ summary_lookback() {
   if [[ "$SUMMARY_LOOKBACK" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "$SUMMARY_LOOKBACK"
   else
-    printf '%s\n' "1"
+    printf '%s\n' "3"
   fi
 }
 
@@ -351,7 +356,7 @@ write_phase_summary() {
   local provider_name="$4"
   local model="$5"
   local exit_status="$6"
-  local summary_file_path human_notes
+  local summary_file_path preserved_notes
 
   summary_file_path="$(summary_file "$phase")"
 
@@ -360,9 +365,10 @@ write_phase_summary() {
     return 1
   fi
 
-  human_notes="$(awk '
+  preserved_notes="$(awk '
+    /^## Implementation Handoff$/ { found = 1 }
+    found && (/^## Verification$/ || /^## Worktree Snapshot$/) { exit }
     found { print }
-    /^## Human Notes$/ { found = 1; print }
   ' "$summary_file_path" 2>/dev/null || true)"
 
   if ! {
@@ -375,17 +381,38 @@ write_phase_summary() {
     echo "- Completed: ${timestamp}"
     echo "- Exit status: ${exit_status}"
     echo
-    if [[ -n "$human_notes" ]]; then
-      printf '%s\n' "$human_notes"
+    if [[ -n "$preserved_notes" ]]; then
+      printf '%s\n' "$preserved_notes"
     else
-      echo "## Human Notes"
+      echo "## Implementation Handoff"
       echo
-      echo "- Add notes here."
+      echo "- No provider-authored handoff was recorded."
     fi
+    echo
+    echo "## Verification"
+    printf '%s\n' "${LAST_VERIFICATION_REPORT:-- Not run.}"
+    echo
+    echo "## Worktree Snapshot"
+    git_worktree_snapshot
   } > "$summary_file_path"; then
     warn "failed to write phase summary: $summary_file_path"
     return 1
   fi
+}
+
+git_worktree_snapshot() {
+  local output
+  if ! git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%s\n' "- not a git repository"
+    return 0
+  fi
+
+  output="$(git -C "$ROOT_DIR" status --short 2>/dev/null || true)"
+  if [[ -z "$output" ]]; then
+    printf '%s\n' "- clean"
+    return 0
+  fi
+  printf '%s\n' "$output" | awk 'NR <= 40 { print "- `" $0 "`" } NR == 41 { print "- ..."; exit }'
 }
 
 git_branch() {
@@ -722,6 +749,86 @@ verification_hints_block() {
   done < <(phase_annotations "$phase")
 }
 
+annotation_verification_commands() {
+  local phase="$1"
+  local source key value
+
+  while IFS=$'\t' read -r source key value; do
+    if [[ "$key" == "verify" ]]; then
+      printf '%s\n' "$value"
+    fi
+  done < <(phase_annotations "$phase")
+}
+
+inferred_verification_commands() {
+  if [[ -f "$ROOT_DIR/package.json" ]] && grep -Eq '"test"[[:space:]]*:' "$ROOT_DIR/package.json"; then
+    if [[ -f "$ROOT_DIR/pnpm-lock.yaml" ]]; then
+      printf '%s\n' "pnpm test"
+    elif [[ -f "$ROOT_DIR/yarn.lock" ]]; then
+      printf '%s\n' "yarn test"
+    else
+      printf '%s\n' "npm test"
+    fi
+  elif [[ -f "$ROOT_DIR/pyproject.toml" || -f "$ROOT_DIR/pytest.ini" || -f "$ROOT_DIR/tox.ini" ]]; then
+    printf '%s\n' "pytest"
+  elif [[ -f "$ROOT_DIR/go.mod" ]]; then
+    printf '%s\n' "go test ./..."
+  elif [[ -f "$ROOT_DIR/Cargo.toml" ]]; then
+    printf '%s\n' "cargo test"
+  elif [[ -f "$ROOT_DIR/Makefile" ]]; then
+    printf '%s\n' "make test"
+  elif [[ -d "$ROOT_DIR/tests" ]] && find "$ROOT_DIR/tests" -maxdepth 1 -type f -name '*.sh' -print -quit 2>/dev/null | grep -q .; then
+    printf '%s\n' 'for test_file in tests/*.sh; do bash "$test_file"; done'
+  elif [[ -f "$ROOT_DIR/bin/codex-spec-runner" ]]; then
+    printf '%s\n' "bash -n bin/codex-spec-runner"
+  fi
+}
+
+phase_verification_commands() {
+  local phase="$1"
+  local annotated
+  annotated="$(annotation_verification_commands "$phase")"
+  if [[ -n "$annotated" ]]; then
+    printf '%s\n' "$annotated"
+  else
+    inferred_verification_commands
+  fi
+}
+
+run_phase_verification() {
+  local phase="$1"
+  local command found=0 status=0
+  local report=""
+
+  if [[ "$RUN_VERIFICATION" != "1" ]]; then
+    LAST_VERIFICATION_REPORT="- Skipped because RUN_VERIFICATION=${RUN_VERIFICATION}."
+    echo "Verification: skipped."
+    return 0
+  fi
+
+  while IFS= read -r command; do
+    [[ -n "$command" ]] || continue
+    found=1
+    echo "Verification: running ${command}"
+    if (cd "$ROOT_DIR" && "$VERIFY_SHELL" -lc "$command"); then
+      report="${report}- passed: \`${command}\`"$'\n'
+    else
+      status=$?
+      report="${report}- failed (${status}): \`${command}\`"$'\n'
+      break
+    fi
+  done < <(phase_verification_commands "$phase")
+
+  if [[ "$found" == "0" ]]; then
+    LAST_VERIFICATION_REPORT="- No verification command was annotated or inferred."
+    echo "Verification: no command available."
+    return 0
+  fi
+
+  LAST_VERIFICATION_REPORT="${report%$'\n'}"
+  return "$status"
+}
+
 override_execution_target() {
   local phase="$1"
   local default_provider="${2:-$PROVIDER}"
@@ -749,13 +856,13 @@ phase_model_tier() {
   body="$(extract_phase_body "$phase")"
   lower="$(printf '%s\n%s\n' "$title" "$body" | tr '[:upper:]' '[:lower:]')"
 
-  if grep -Eq 'custody|wallet|key-management|liquidity|routing|mev|gas|reconciliation|accounting|tax|compliance|permission|audit' <<< "$title_lower"; then
+  if grep -Eq 'architecture|security|threat|migration|data integrity|custody|wallet|key-management|liquidity|routing|mev|gas|reconciliation|accounting|tax|compliance|permission|audit|review|final verification|release' <<< "$title_lower"; then
     echo "high"
   elif grep -Eq 'dashboard|operations|monitoring|alerts|incidents|analytics|data quality|risk engine|token.*scanner|execution simulation|historical|backtesting|walk-forward|promotion' <<< "$title_lower"; then
     echo "default"
-  elif grep -Eq 'private key|key-management|live routing|cancel/replace|cancel and replace|mev|gas-aware|tax-lot|reconciliation|compliance|operator permission' <<< "$lower"; then
+  elif grep -Eq 'private key|key-management|live routing|cancel/replace|cancel and replace|mev|gas-aware|tax-lot|reconciliation|compliance|operator permission|breaking change|cross[- ]module|concurrency|race condition|schema migration' <<< "$lower"; then
     echo "high"
-  elif grep -Eq 'small ui|minor ui|simple api|copy change|documentation only|docs only' <<< "$lower"; then
+  elif grep -Eq 'small ui|minor ui|simple api|copy change|documentation only|docs only|readme only|changelog only' <<< "$lower"; then
     echo "mini"
   else
     echo "default"
@@ -853,8 +960,9 @@ Guardrails:
 - Preserve existing behavior unless this phase explicitly requires a change.
 - Use existing codebase patterns.
 - Do not touch node_modules.
-- Add or update focused tests/checks where appropriate.
-- Run verification before finishing.
+- Generate or update focused tests for every behavior changed in this phase.
+- Run the verification hints before finishing; the runner will rerun them independently.
+- Before finishing, write a concise handoff to $(summary_file "$phase") under "## Implementation Handoff". Include changes, decisions, tests run, and unresolved follow-ups. Keep it under 40 lines.
 
 Relevant phase section from the spec:
 
@@ -895,6 +1003,7 @@ run_preflight() {
   local seen_codex=0 seen_claude=0
   local -a add_dirs=()
   local add_dir
+  local verification_shell_name
 
   if [[ -f "$SPEC_FILE" ]]; then
     preflight_note "ok" "spec file exists: $SPEC_FILE"
@@ -1001,6 +1110,23 @@ run_preflight() {
     done
   fi
 
+  if [[ "$RUN_VERIFICATION" == "1" ]]; then
+    verification_shell_name="$VERIFY_SHELL"
+    if [[ "$verification_shell_name" == */* ]]; then
+      if [[ -x "$verification_shell_name" ]]; then
+        preflight_note "ok" "verification shell is executable: $verification_shell_name"
+      else
+        preflight_note "error" "verification shell is not executable: $verification_shell_name"
+        errors=$((errors + 1))
+      fi
+    elif command -v "$verification_shell_name" >/dev/null 2>&1; then
+      preflight_note "ok" "verification shell found on PATH: $verification_shell_name"
+    else
+      preflight_note "error" "verification shell not found on PATH: $verification_shell_name"
+      errors=$((errors + 1))
+    fi
+  fi
+
   if [[ -n "$TARGET" ]]; then
     if [[ "$TARGET" == "all" ]]; then
       for phase in "${PHASE_ORDER[@]}"; do
@@ -1069,7 +1195,11 @@ run_preflight() {
     return 1
   fi
 
-  preflight_note "result" "ok${warnings:+ with ${warnings} warning(s)}"
+  if (( warnings > 0 )); then
+    preflight_note "result" "ok with ${warnings} warning(s)"
+  else
+    preflight_note "result" "ok"
+  fi
 }
 
 run_codex_phase() {
@@ -1167,6 +1297,10 @@ run_phase() {
   echo "Provider: ${provider}"
   echo "Model: ${model}"
 
+  if [[ ! -d "$SUMMARY_DIR" ]]; then
+    mkdir -p "$SUMMARY_DIR" || die "failed to prepare summary directory: $SUMMARY_DIR"
+  fi
+
   if [[ "$dry_run" == "1" ]]; then
     echo "Status: dry-run only; ${provider_name} was not started."
     if [[ "$verbose" == "1" ]]; then
@@ -1174,21 +1308,42 @@ run_phase() {
       phase_prompt "$phase" "$verbose"
       echo "--- end prompt ---"
     fi
+    LAST_VERIFICATION_REPORT="- Planned for non-dry execution."
+    while IFS= read -r verification_command; do
+      [[ -n "$verification_command" ]] || continue
+      LAST_VERIFICATION_REPORT="${LAST_VERIFICATION_REPORT}"$'\n'"- \`${verification_command}\`"
+    done < <(phase_verification_commands "$phase")
     exit_status=0
   else
     case "$provider" in
       codex)
-        run_codex_phase "$phase" "$verbose" "$model"
-        exit_status=$?
+        if run_codex_phase "$phase" "$verbose" "$model"; then
+          exit_status=0
+        else
+          exit_status=$?
+        fi
         ;;
       claude)
-        run_claude_phase "$phase" "$verbose" "$model"
-        exit_status=$?
+        if run_claude_phase "$phase" "$verbose" "$model"; then
+          exit_status=0
+        else
+          exit_status=$?
+        fi
         ;;
       *)
         die "unsupported provider: $PROVIDER"
         ;;
     esac
+
+    if [[ "$exit_status" == "0" ]]; then
+      if run_phase_verification "$phase"; then
+        :
+      else
+        exit_status=$?
+      fi
+    else
+      LAST_VERIFICATION_REPORT="- Not run because the provider exited with status ${exit_status}."
+    fi
   fi
 
   write_manifest_row "$timestamp" "$phase" "$title" "$provider" "$model" "$dry_run" "$exit_status" || true
@@ -1212,6 +1367,7 @@ VERBOSE="0"
 FROM_PHASE=""
 TO_PHASE=""
 EXTRA_READ_FILES=()
+LAST_VERIFICATION_REPORT=""
 
 if [[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
   usage
