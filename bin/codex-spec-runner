@@ -316,7 +316,6 @@ previous_summary_files() {
   local index current_index="" lookback_count found=0 prior_phase prior_summary
   local files=()
 
-  [[ "$TARGET" == "all" ]] || return 0
   phase_summaries_enabled || return 0
 
   lookback_count="$(summary_lookback)"
@@ -1538,7 +1537,7 @@ else
     run_preflight
   fi
 
-  if [[ "$REFRESH_CONTEXT" == "1" ]]; then
+  if shared_context_enabled && [[ "$REFRESH_CONTEXT" == "1" || ! -f "$CONTEXT_FILE" ]]; then
     write_shared_context
   fi
 

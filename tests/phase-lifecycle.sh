@@ -94,6 +94,46 @@ grep -F "generated result and regression test" "${STATE}/summaries/phase-1.md" >
 grep -F 'passed: `bash tests/generated.sh`' "${STATE}/summaries/phase-1.md" >/dev/null
 grep -F "${STATE}/summaries/phase-1.md" "${TMP_DIR}/prompts" >/dev/null
 
+single_state="${TMP_DIR}/single-state"
+mkdir -p "${single_state}/summaries"
+cp "${STATE}/summaries/phase-1.md" "${single_state}/summaries/phase-1.md"
+
+single_output="$(
+  COMMON_READ_FILES="spec.md" \
+  ROOT_DIR="$ROOT" \
+  STATE_DIR="$single_state" \
+  CONTEXT_FILE="${single_state}/context.md" \
+  MANIFEST_FILE="${single_state}/manifest.tsv" \
+  SUMMARY_DIR="${single_state}/summaries" \
+  "$RUNNER" "$SPEC" 2 --dry-run --verbose
+)"
+
+[[ -f "${single_state}/context.md" ]]
+printf '%s\n' "$single_output" | grep -F -- "- ${single_state}/context.md" >/dev/null
+printf '%s\n' "$single_output" | grep -F -- "- ${single_state}/summaries/phase-1.md" >/dev/null
+
+disabled_state="${TMP_DIR}/disabled-state"
+mkdir -p "${disabled_state}/summaries"
+cp "${STATE}/summaries/phase-1.md" "${disabled_state}/summaries/phase-1.md"
+
+disabled_output="$(
+  COMMON_READ_FILES="spec.md" \
+  ROOT_DIR="$ROOT" \
+  STATE_DIR="$disabled_state" \
+  CONTEXT_FILE="${disabled_state}/context.md" \
+  MANIFEST_FILE="${disabled_state}/manifest.tsv" \
+  SUMMARY_DIR="${disabled_state}/summaries" \
+  USE_SHARED_CONTEXT=0 \
+  USE_PHASE_SUMMARIES=0 \
+  "$RUNNER" "$SPEC" 2 --dry-run --verbose
+)"
+
+[[ ! -f "${disabled_state}/context.md" ]]
+if printf '%s\n' "$disabled_output" | grep -F -- "- ${disabled_state}/summaries/phase-1.md" >/dev/null; then
+  echo "single-phase run unexpectedly included summaries with USE_PHASE_SUMMARIES=0" >&2
+  exit 1
+fi
+
 failing_spec="${ROOT}/failing.md"
 cat > "$failing_spec" <<'EOF'
 ## Phase 1 - Implementation

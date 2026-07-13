@@ -163,9 +163,9 @@ Normal non-dry-run execution runs preflight automatically unless `SKIP_PREFLIGHT
 - `manifest.tsv`: one tab-separated row per attempted phase run
 - `summaries/phase-N.md`: lightweight per-phase summary placeholders
 
-Shared context is opt-in for single-phase runs and automatic for `all` runs when `USE_SHARED_CONTEXT=1` and `context.md` does not already exist. It summarizes cheap local facts only: timestamp, root path, git status, top-level layout, detected package/config files, likely verification commands, and configured common read files.
+Shared context is generated automatically for both single-phase and `all` runs when `USE_SHARED_CONTEXT=1` and `context.md` does not already exist. It summarizes cheap local facts only: timestamp, root path, git status, top-level layout, detected package/config files, likely verification commands, and configured common read files.
 
-Providers are asked to record a concise implementation handoff with changes, decisions, tests, and follow-ups. The runner preserves that handoff, adds independently observed verification results and a worktree snapshot, and includes up to three successful summaries in later `all` prompts by default.
+Providers are asked to record a concise implementation handoff with changes, decisions, tests, and follow-ups. The runner preserves that handoff, adds independently observed verification results and a worktree snapshot, and includes up to three successful summaries in later phase prompts by default.
 
 These generated files are safe to delete:
 
@@ -279,7 +279,7 @@ COMMON_READ_FILES="package.json pipeline.js server.js"
 - `SKIP_PREFLIGHT`: set to `1` to skip automatic preflight on normal runs
 - `USE_SHARED_CONTEXT`: set to `0` to omit `context.md` from prompts
 - `USE_PHASE_SUMMARIES`: set to `0` to omit prior phase summaries from later prompts
-- `SUMMARY_LOOKBACK`: number of previous successful summaries to include during `all`
+- `SUMMARY_LOOKBACK`: number of previous successful summaries to include in a later phase prompt
 - `RUN_VERIFICATION`: set to `0` to skip runner-managed verification after provider execution
 - `VERIFY_SHELL`: shell used with `-lc` for verification commands
 - `SANDBOX_MODE`, `APPROVAL_POLICY`, `MODE`: Codex-only execution settings
@@ -298,7 +298,7 @@ Manifest and summary behavior:
 
 - `manifest.tsv` records each attempted phase run, including dry-runs and non-zero exits
 - `summaries/phase-N.md` is updated after each attempt with the provider handoff, verification results, and current worktree snapshot
-- later phases in `all` can read recent successful summaries unless `USE_PHASE_SUMMARIES=0`
+- later phases can read recent successful summaries in both single-phase and `all` runs unless `USE_PHASE_SUMMARIES=0`
 
 When a phase has one or more `runner:verify` annotations, the commands run in declaration order and the first failure fails the phase and stops an `all` run. Without annotations, the runner conservatively infers one project-level check from common package files or shell tests. Verification is never executed during `--dry-run`.
 Run only trusted specs: verification annotations are shell commands executed from `ROOT_DIR`.
