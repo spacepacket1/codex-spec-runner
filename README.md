@@ -10,9 +10,9 @@ Current version: `0.3.0`
 
 Featured as an e3d-cast gallery sample:
 
-<video src="https://gateway.pinata.cloud/ipfs/QmVaohJ1WWTNZpVrrwpGmLy6Jk6hyVRQ1eAf4vvf4efv4r" controls width="720"></video>
+<video src="https://cast.e3d.ai/samples/codex-spec-runner/video.mp4" controls width="720"></video>
 
-[Watch the video](https://gateway.pinata.cloud/ipfs/QmVaohJ1WWTNZpVrrwpGmLy6Jk6hyVRQ1eAf4vvf4efv4r)
+[Watch the video](https://cast.e3d.ai/samples/codex-spec-runner/video.mp4)
 
 ## Why
 
