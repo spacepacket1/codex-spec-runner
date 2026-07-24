@@ -6,6 +6,14 @@ Current version: `0.3.0`
 
 `codex-spec-runner` turns a phased Markdown spec into separate provider runs. Each phase gets a fresh conversation, a focused prompt, and a model selected from conservative defaults or explicit overrides.
 
+## Demo
+
+Featured as an e3d-cast gallery sample:
+
+<video src="https://gateway.pinata.cloud/ipfs/QmVaohJ1WWTNZpVrrwpGmLy6Jk6hyVRQ1eAf4vvf4efv4r" controls width="720"></video>
+
+[Watch the video](https://gateway.pinata.cloud/ipfs/QmVaohJ1WWTNZpVrrwpGmLy6Jk6hyVRQ1eAf4vvf4efv4r)
+
 ## Why
 
 Large implementation specs can waste context when every phase runs in one long conversation. This runner keeps each phase isolated so the selected provider starts with only the relevant spec section, the current working tree, and the files you tell it to read first.
