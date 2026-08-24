@@ -21,6 +21,7 @@ APPROVAL_POLICY="${APPROVAL_POLICY:-on-request}"
 MODE="${MODE:-exec}"
 CODEX_EPHEMERAL="${CODEX_EPHEMERAL:-1}"
 CODEX_SKIP_GIT_REPO_CHECK="${CODEX_SKIP_GIT_REPO_CHECK:-0}"
+CODEX_NETWORK_ACCESS="${CODEX_NETWORK_ACCESS:-0}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-default}"
 CLAUDE_NO_SESSION_PERSISTENCE="${CLAUDE_NO_SESSION_PERSISTENCE:-1}"
 ADD_DIRS="${ADD_DIRS:-${CODEX_ADD_DIRS:-}}"
@@ -1220,6 +1221,9 @@ run_codex_phase() {
   fi
   if [[ "$CODEX_SKIP_GIT_REPO_CHECK" == "1" ]]; then
     codex_args+=(--skip-git-repo-check)
+  fi
+  if [[ "$CODEX_NETWORK_ACCESS" == "1" ]]; then
+    codex_args+=(-c sandbox_workspace_write.network_access=true)
   fi
   if [[ -n "$ADD_DIRS" ]]; then
     # shellcheck disable=SC2206

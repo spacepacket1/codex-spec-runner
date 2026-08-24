@@ -271,6 +271,7 @@ APPROVAL_POLICY=on-request
 MODE=exec
 CODEX_EPHEMERAL=1
 CODEX_SKIP_GIT_REPO_CHECK=0
+CODEX_NETWORK_ACCESS=0
 CLAUDE_PERMISSION_MODE=default
 CLAUDE_NO_SESSION_PERSISTENCE=1
 ADD_DIRS="/path/to/extra/repo /path/to/output"
@@ -293,6 +294,7 @@ COMMON_READ_FILES="package.json pipeline.js server.js"
 - `SANDBOX_MODE`, `APPROVAL_POLICY`, `MODE`: Codex-only execution settings
 - `CODEX_EPHEMERAL`: set to `0` to let Codex persist phase sessions; default `1` avoids stale session persistence during runner-managed phase runs
 - `CODEX_SKIP_GIT_REPO_CHECK`: set to `1` to pass `--skip-git-repo-check` to `codex exec`
+- `CODEX_NETWORK_ACCESS`: set to `1` to pass `-c sandbox_workspace_write.network_access=true` to `codex exec`, enabling outbound network and inbound socket binds inside the `workspace-write` sandbox; default `0` keeps Codex's own network-disabled default. Needed for phases whose verification binds a listening socket (e.g. a local web-server test) — without it, `codex exec`'s sandbox denies the bind with `EPERM`.
 - `CLAUDE_PERMISSION_MODE`: passed to `claude --permission-mode`
 - `CLAUDE_NO_SESSION_PERSISTENCE`: set to `0` to let Claude persist phase sessions
 - `ADD_DIRS`: space-separated directories to pass as repeated `--add-dir` flags to the selected provider
